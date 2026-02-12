@@ -1,0 +1,5 @@
+build/*
+!build/images/
+*.pdb
+*.dll
+*.exe

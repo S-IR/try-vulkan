@@ -38,7 +38,6 @@ ShaderData :: struct {
 	view:       matrix[4, 4]f32,
 	model:      [3]matrix[4, 4]f32,
 	lightPos:   [4]f32,
-	selected:   u32,
 }
 ShaderDataBuffer :: struct {
 	allocation:    vma.Allocation,

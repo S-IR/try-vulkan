@@ -8,7 +8,6 @@ struct ShaderData {
     mat4 view;
     mat4 model[3];
     vec4 lightPos;
-    uint selected;
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ShaderDataRef {
@@ -52,7 +51,6 @@ void main()
 
     vLightVec = data.lightPos.xyz - viewPos.xyz;
     vViewVec = -viewPos.xyz;
-    vFactor = (data.selected == gl_InstanceIndex) ? vec3(3.0) : vec3(1.0);
 }
 #endif
 

@@ -1,5 +1,4 @@
 *.exe
-build/
 *.pdb
-*.ddl
-    
+*.rdb
+build/

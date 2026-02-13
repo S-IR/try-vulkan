@@ -4,6 +4,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 
+
 Vertex :: struct {
 	pos:  [3]f32,
 	uv:   [2]f32,

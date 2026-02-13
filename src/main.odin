@@ -920,7 +920,6 @@ vulkan_render :: proc(c: ^Camera) {
 		model =
 			la.matrix4_translate_f32([3]f32{f32(i * 3), 0, 0}) *
 			la.identity_matrix(matrix[4, 4]f32)
-
 	}
 
 	mem.copy(shaderDataBuffers[frameIndex].mapped, &shaderData, size_of(shaderData))

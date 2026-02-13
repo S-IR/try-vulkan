@@ -2,10 +2,8 @@ package main
 
 import ktx "../modules/libktx"
 import "../modules/vma"
-import "core:c"
 import "core:fmt"
 import "core:log"
-import "core:math"
 import la "core:math/linalg"
 import "core:mem"
 import "core:os"
@@ -32,6 +30,7 @@ main :: proc() {
 	vulkan_init()
 	defer vulkan_cleanup()
 
+	pipeline_init()
 	quit := false
 	prevScreenWidth := screenWidth
 	prevScreenHeight := screenHeight
@@ -39,16 +38,23 @@ main :: proc() {
 	e: sdl.Event
 
 
+	lastFrameTime := time.now()
+	camera := Camera_new()
 	for !quit {
 
 		defer free_all(context.temp_allocator)
 
+		defer {
+			frameEnd := time.now()
+			frameDuration := time.diff(frameEnd, lastFrameTime)
+
+			dt = time.duration_seconds(time.since(lastFrameTime))
+			lastFrameTime = time.now()
+		}
+
+
 		for sdl.PollEvent(&e) {
 
-			SCALE_STEP :: f32(0.001)
-			PERSIST_STEP :: f32(0.01)
-			LACUNARITY_STEP :: f64(0.1)
-			OCTAVE_STEP :: 1
 			#partial switch e.type {
 			case .QUIT:
 				quit = true
@@ -70,7 +76,8 @@ main :: proc() {
 
 			case .WINDOW_RESIZED:
 				screenWidth, screenHeight = u32(e.window.data1), u32(e.window.data2)
-
+			case .MOUSE_MOTION:
+				Camera_process_mouse_movement(&camera, e.motion.xrel, e.motion.yrel)
 			case:
 				continue
 			}
@@ -78,20 +85,8 @@ main :: proc() {
 			if prevScreenWidth != screenWidth || prevScreenHeight != screenHeight {
 				sdl.SetWindowSize(window, i32(screenWidth), i32(screenHeight))
 
-				// sdl.ReleaseGPUTexture(device, depthTexture)
-				// depthTexture = sdl.CreateGPUTexture(
-				// 	device,
-				// 	sdl.GPUTextureCreateInfo {
-				// 		type = .D2,
-				// 		width = u32(screenWidth),
-				// 		height = u32(screenHeight),
-				// 		layer_count_or_depth = 1,
-				// 		num_levels = 1,
-				// 		sample_count = ._1,
-				// 		format = .D24_UNORM,
-				// 		usage = {.DEPTH_STENCIL_TARGET},
-				// 	},
-				// )
+				updateSwapchain = true
+				vulkan_update_swapchain()
 
 				sdl.SyncWindow(window)
 				prevScreenWidth = screenWidth
@@ -99,7 +94,10 @@ main :: proc() {
 			}
 
 		}
-		vulkan_render()
+		Camera_process_keyboard_movement(&camera)
+
+		vulkan_update_swapchain()
+		vulkan_render(&camera)
 	}
 }
 vulkan_init :: proc() {
@@ -133,18 +131,53 @@ vulkan_init :: proc() {
 
 	deviceCount: u32 = 0
 	vk_chk(vk.EnumeratePhysicalDevices(vkInstance, &deviceCount, nil))
-	devices := make([]vk.PhysicalDevice, deviceCount)
+	devices := make([]vk.PhysicalDevice, deviceCount, context.temp_allocator)
+	if deviceCount == 0 {
+		fmt.eprintln("cannot find any device supporting our given Vulkan requirements")
+		os.exit(1)
+	}
 
 	vk_chk(vk.EnumeratePhysicalDevices(vkInstance, &deviceCount, raw_data(devices)))
-	deviceIndex: u32 = 1
 
 	deviceProperties := vk.PhysicalDeviceProperties2 {
 		sType = .PHYSICAL_DEVICE_PROPERTIES_2,
 	}
+	bestScore: i32 = -1
+	bestDevice: vk.PhysicalDevice
 
-	vkPhysicalDevice = devices[deviceIndex]
+	for d in devices {
+		score: i32 = 0
+
+		props: vk.PhysicalDeviceProperties
+		vk.GetPhysicalDeviceProperties(d, &props)
+		if props.deviceType == .DISCRETE_GPU {
+			score += 1000_000_000
+		}
+
+		memProps: vk.PhysicalDeviceMemoryProperties
+		vk.GetPhysicalDeviceMemoryProperties(d, &memProps)
+
+		totalVRAM: vk.DeviceSize = 0
+		for heap in memProps.memoryHeaps[:memProps.memoryHeapCount] {
+			if .DEVICE_LOCAL in heap.flags {
+				totalVRAM += heap.size
+			}
+		}
+		score += i32(totalVRAM / (1024 * 1024))
+
+		if score > bestScore {
+			bestScore = score
+			bestDevice = d
+		}
+	}
+
+	if bestScore == -1 {
+		fmt.eprintln("cannot find any device supporting our given Vulkan requirements")
+		os.exit(1)
+	}
+	vkPhysicalDevice = bestDevice
 	vk.GetPhysicalDeviceProperties2(vkPhysicalDevice, &deviceProperties)
-	fmt.printfln("Selected device: %s", deviceProperties.properties.deviceName)
+	// fmt.printfln("Selected device: %s", deviceProperties.properties.deviceName)
 	queueFamilyCount: u32 = 0
 	vk.GetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, nil)
 	queueFamilies := make([]vk.QueueFamilyProperties, queueFamilyCount)
@@ -154,19 +187,24 @@ vulkan_init :: proc() {
 		&queueFamilyCount,
 		raw_data(queueFamilies),
 	)
-	queueFamilyIndex: u32 = 0
 	for queueFamily, i in queueFamilies {
 		if (.GRAPHICS in queueFamily.queueFlags) {
-			queueFamilyIndex = u32(i)
+			vkGraphicsQueueFamilyIndex = u32(i)
 			break
 		}
 	}
-	ensure(sdl.Vulkan_GetPresentationSupport(vkInstance, vkPhysicalDevice, queueFamilyIndex))
+	ensure(
+		sdl.Vulkan_GetPresentationSupport(
+			vkInstance,
+			vkPhysicalDevice,
+			vkGraphicsQueueFamilyIndex,
+		),
+	)
 	// Logical device
 	qfpriorities: f32 = 1.0
 	queueCI := vk.DeviceQueueCreateInfo {
 		sType            = .DEVICE_QUEUE_CREATE_INFO,
-		queueFamilyIndex = queueFamilyIndex,
+		queueFamilyIndex = vkGraphicsQueueFamilyIndex,
 		queueCount       = 1,
 		pQueuePriorities = &qfpriorities,
 	}
@@ -178,7 +216,7 @@ vulkan_init :: proc() {
 		shaderSampledImageArrayNonUniformIndexing = true,
 		descriptorBindingVariableDescriptorCount  = true,
 		runtimeDescriptorArray                    = true,
-		bufferDeviceAddress                       = true,
+		// bufferDeviceAddress                       = true,
 	}
 	enabledVk13Features := vk.PhysicalDeviceVulkan13Features {
 		sType            = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -201,13 +239,13 @@ vulkan_init :: proc() {
 		pEnabledFeatures        = &enabledVk10Features,
 	}
 	vk_chk(vk.CreateDevice(vkPhysicalDevice, &deviceCI, nil, &vkDevice))
-	vk.GetDeviceQueue(vkDevice, queueFamilyIndex, 0, &vkQueue)
+	vk.GetDeviceQueue(vkDevice, vkGraphicsQueueFamilyIndex, 0, &vkQueue)
 	vmaVulkanFunctions := vma.create_vulkan_functions()
 
 	vk_chk(
 		vma.create_allocator(
 			{
-				flags = {.Buffer_Device_Address},
+				flags = {},
 				physical_device = vkPhysicalDevice,
 				device = vkDevice,
 				instance = vkInstance,
@@ -217,9 +255,44 @@ vulkan_init :: proc() {
 		),
 	)
 
+
 	ensure(sdl.Vulkan_CreateSurface(window, vkInstance, nil, &vkSurface))
 	surfaceCaps: vk.SurfaceCapabilitiesKHR
 	vk_chk(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vkPhysicalDevice, vkSurface, &surfaceCaps))
+
+
+	formatCount: u32 = 0
+	vk_chk(vk.GetPhysicalDeviceSurfaceFormatsKHR(vkPhysicalDevice, vkSurface, &formatCount, nil))
+	surfaceFormats := make([]vk.SurfaceFormatKHR, formatCount)
+	vk_chk(
+		vk.GetPhysicalDeviceSurfaceFormatsKHR(
+			vkPhysicalDevice,
+			vkSurface,
+			&formatCount,
+			raw_data(surfaceFormats),
+		),
+	)
+
+	preferredFormat := surfaceFormats[0]
+	for f in surfaceFormats {
+		if (f.format == .A2B10G10R10_UNORM_PACK32 || f.format == .A2B10G10R10_SINT_PACK32) &&
+		   f.colorSpace == .HDR10_ST2084_EXT {
+			preferredFormat = f
+			break
+		}
+		if f.format == .B10G11R11_UFLOAT_PACK32 || f.format == .R16G16B16A16_SFLOAT {
+			preferredFormat = f
+			break
+		}
+		if f.format == .B8G8R8A8_SRGB && f.colorSpace == .SRGB_NONLINEAR {
+			preferredFormat = f
+		}
+	}
+
+	swapchainImageFormat = preferredFormat.format
+	swapchainColorSpace = preferredFormat.colorSpace
+	ensure(swapchainImageFormat != .UNDEFINED)
+
 	vk_chk(
 		vk.CreateSwapchainKHR(
 			vkDevice,
@@ -227,8 +300,8 @@ vulkan_init :: proc() {
 				sType = .SWAPCHAIN_CREATE_INFO_KHR,
 				surface = vkSurface,
 				minImageCount = surfaceCaps.minImageCount,
-				imageFormat = .B8G8R8A8_SRGB,
-				imageColorSpace = .SRGB_NONLINEAR,
+				imageFormat = swapchainImageFormat,
+				imageColorSpace = preferredFormat.colorSpace,
 				imageExtent = {
 					width = surfaceCaps.currentExtent.width,
 					height = surfaceCaps.currentExtent.height,
@@ -326,61 +399,6 @@ vulkan_init :: proc() {
 	)
 
 
-	fmt.println(os.get_current_directory())
-	ensure(os.exists(filepath.join({os.get_current_directory(), "assets", "suzanne.obj"})))
-	objMesh, ok := obj.load_obj(filepath.join({"assets", "suzanne.obj"}, context.temp_allocator))
-	ensure(ok)
-
-	bufferCI := vk.BufferCreateInfo {
-		sType = .BUFFER_CREATE_INFO,
-		size  = vk.DeviceSize(
-			size_of(obj.Vertex) * len(objMesh.vertices) + size_of(u32) * len(objMesh.indices),
-		),
-		usage = {.VERTEX_BUFFER, .INDEX_BUFFER},
-	}
-
-	bufferAllocCI := vma.Allocation_Create_Info {
-		flags = {.Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead},
-		usage = .Auto,
-	}
-
-	vk_chk(
-		vma.create_buffer(
-			vkAllocator,
-			{
-				sType = .BUFFER_CREATE_INFO,
-				size = vk.DeviceSize(
-					size_of(obj.Vertex) * len(objMesh.vertices) +
-					size_of(u32) * len(objMesh.indices),
-				),
-				usage = {.VERTEX_BUFFER, .INDEX_BUFFER},
-			},
-			{
-				flags = {.Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead},
-				usage = .Auto,
-			},
-			&vBuffer,
-			&vBufferAllocation,
-			nil,
-		),
-	)
-	bufferPtr: rawptr
-	vertexBufferSize = size_of(obj.Vertex) * len(objMesh.vertices)
-
-	vk_chk(vma.map_memory(vkAllocator, vBufferAllocation, &bufferPtr))
-	mem.copy(bufferPtr, raw_data(objMesh.vertices), size_of(obj.Vertex) * len(objMesh.vertices))
-
-	indexOffset := vk.DeviceSize(vertexBufferSize)
-
-	indicesCount = u32(len(objMesh.indices))
-	mem.copy(
-		rawptr(uintptr(bufferPtr) + uintptr(vertexBufferSize)),
-		raw_data(objMesh.indices),
-		size_of(u32) * len(objMesh.indices),
-	)
-	vma.unmap_memory(vkAllocator, vBufferAllocation)
-
-
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		vk_chk(
 			vma.create_buffer(
@@ -388,7 +406,7 @@ vulkan_init :: proc() {
 				{
 					sType = .BUFFER_CREATE_INFO,
 					size = size_of(ShaderData),
-					usage = {.SHADER_DEVICE_ADDRESS},
+					usage = {.UNIFORM_BUFFER},
 				},
 				{
 					flags = {
@@ -410,12 +428,6 @@ vulkan_init :: proc() {
 				&shaderDataBuffers[i].mapped,
 			),
 		)
-
-		shaderDataBuffers[i].deviceAddress = vk.GetBufferDeviceAddress(
-			vkDevice,
-			&{sType = .BUFFER_DEVICE_ADDRESS_INFO, buffer = shaderDataBuffers[i].buffer},
-		)
-
 
 	}
 	semaphoreCI := vk.SemaphoreCreateInfo {
@@ -443,7 +455,7 @@ vulkan_init :: proc() {
 			&{
 				sType = .COMMAND_POOL_CREATE_INFO,
 				flags = {.RESET_COMMAND_BUFFER},
-				queueFamilyIndex = queueFamilyIndex,
+				queueFamilyIndex = vkGraphicsQueueFamilyIndex,
 			},
 			nil,
 			&vkCommandPool,
@@ -458,9 +470,56 @@ vulkan_init :: proc() {
 				commandPool = vkCommandPool,
 				commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 			},
-			raw_data(commandBuffers[:]),
+			raw_data(drawCommandBuffers[:]),
 		),
 	)
+
+
+}
+pipeline_init :: proc() {
+
+
+	ensure(os.exists(filepath.join({os.get_current_directory(), "assets", "suzanne.obj"})))
+	objMesh, ok := obj.load_obj(filepath.join({"assets", "suzanne.obj"}, context.temp_allocator))
+	ensure(ok)
+
+
+	vk_chk(
+		vma.create_buffer(
+			vkAllocator,
+			{
+				sType = .BUFFER_CREATE_INFO,
+				size = vk.DeviceSize(
+					size_of(obj.Vertex) * len(objMesh.vertices) +
+					size_of(u32) * len(objMesh.indices),
+				),
+				usage = {.VERTEX_BUFFER, .INDEX_BUFFER},
+			},
+			{
+				flags = {.Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead},
+				usage = .Auto,
+			},
+			&vBuffer,
+			&vBufferAllocation,
+			nil,
+		),
+	)
+	bufferPtr: rawptr
+	vertexBufferSize = size_of(obj.Vertex) * len(objMesh.vertices)
+
+	vk_chk(vma.map_memory(vkAllocator, vBufferAllocation, &bufferPtr))
+	mem.copy(bufferPtr, raw_data(objMesh.vertices), size_of(obj.Vertex) * len(objMesh.vertices))
+
+
+	indicesCount = u32(len(objMesh.indices))
+	mem.copy(
+		rawptr(uintptr(bufferPtr) + uintptr(vertexBufferSize)),
+		raw_data(objMesh.indices),
+		size_of(u32) * len(objMesh.indices),
+	)
+	vma.unmap_memory(vkAllocator, vBufferAllocation)
+
+
 	for &texture, i in textures {
 		ktxTexture: ^ktx.Texture
 		ktx.Texture_CreateFromNamedFile(
@@ -598,7 +657,6 @@ vulkan_init :: proc() {
 			raw_data(copyRegions),
 		)
 
-		// Second barrier - reuse the same variable
 		barrierTexImage = vk.ImageMemoryBarrier2 {
 			sType = .IMAGE_MEMORY_BARRIER_2,
 			srcStageMask = {.TRANSFER},
@@ -691,17 +749,28 @@ vulkan_init :: proc() {
 		}
 
 	}
-	descVariableFlag: vk.DescriptorBindingFlags = {.VARIABLE_DESCRIPTOR_COUNT}
-	descBindingFlags := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
-		sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-		bindingCount  = 1,
-		pBindingFlags = &descVariableFlag,
+	descVariableFlags := [?]vk.DescriptorBindingFlags{{}, {.VARIABLE_DESCRIPTOR_COUNT}}
+
+
+	descLayoutBindings := [?]vk.DescriptorSetLayoutBinding {
+		{
+			binding = 0,
+			descriptorType = .UNIFORM_BUFFER,
+			descriptorCount = 1,
+			stageFlags = {.VERTEX},
+		},
+		{
+			binding = 1,
+			descriptorType = .COMBINED_IMAGE_SAMPLER,
+			descriptorCount = len(textures),
+			stageFlags = {.FRAGMENT},
+		},
 	}
 
-	descLayoutBindingTex := vk.DescriptorSetLayoutBinding {
-		descriptorType  = .COMBINED_IMAGE_SAMPLER,
-		descriptorCount = len(textures),
-		stageFlags      = {.FRAGMENT},
+	descBindingFlags := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
+		sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+		bindingCount  = len(descLayoutBindings),
+		pBindingFlags = raw_data(descVariableFlags[:]),
 	}
 
 	vk_chk(
@@ -710,31 +779,37 @@ vulkan_init :: proc() {
 			&{
 				sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 				pNext = &descBindingFlags,
-				bindingCount = 1,
-				pBindings = &descLayoutBindingTex,
+				bindingCount = len(descLayoutBindings),
+				pBindings = raw_data(descLayoutBindings[:]),
 			},
 			nil,
 			&descriptorSetLayoutTex,
 		),
 	)
-
+	poolSizes := [?]vk.DescriptorPoolSize {
+		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = len(textures) * MAX_FRAMES_IN_FLIGHT},
+		{type = .UNIFORM_BUFFER, descriptorCount = MAX_FRAMES_IN_FLIGHT},
+	}
 	vk_chk(
 		vk.CreateDescriptorPool(
 			vkDevice,
 			&{
 				sType = .DESCRIPTOR_POOL_CREATE_INFO,
-				maxSets = 1,
-				poolSizeCount = 1,
-				pPoolSizes = &vk.DescriptorPoolSize {
-					type = .COMBINED_IMAGE_SAMPLER,
-					descriptorCount = len(textures),
-				},
+				maxSets = MAX_FRAMES_IN_FLIGHT,
+				poolSizeCount = len(poolSizes),
+				pPoolSizes = raw_data(poolSizes[:]),
 			},
 			nil,
 			&descriptorPool,
 		),
 	)
 	variableDescCount: u32 = len(textures)
+	layouts := [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout{}
+	for &l in layouts do l = descriptorSetLayoutTex
+
+	variableCounts := [MAX_FRAMES_IN_FLIGHT]u32{}
+	for &c in variableCounts do c = variableDescCount
+
 
 	vk_chk(
 		vk.AllocateDescriptorSets(
@@ -742,32 +817,46 @@ vulkan_init :: proc() {
 			&{
 				sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
 				descriptorPool = descriptorPool,
-				descriptorSetCount = 1,
-				pSetLayouts = &descriptorSetLayoutTex,
+				descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+				pSetLayouts = raw_data(layouts[:]),
 				pNext = &vk.DescriptorSetVariableDescriptorCountAllocateInfo {
 					sType = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
-					descriptorSetCount = 1,
-					pDescriptorCounts = &variableDescCount,
+					descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+					pDescriptorCounts = raw_data(variableCounts[:]),
 				},
 			},
-			&descriptorSetTex,
+			raw_data(descriptorSets[:]),
 		),
 	)
-	vk.UpdateDescriptorSets(
-		vkDevice,
-		1,
-		&vk.WriteDescriptorSet {
-			sType = .WRITE_DESCRIPTOR_SET,
-			dstSet = descriptorSetTex,
-			dstBinding = 0,
-			descriptorCount = len(textures),
-			descriptorType = .COMBINED_IMAGE_SAMPLER,
-			pImageInfo = raw_data(textureDescriptors[:]),
-		},
-		0,
-		nil,
-	)
 
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		bufferInfo := vk.DescriptorBufferInfo {
+			buffer = shaderDataBuffers[i].buffer,
+			offset = 0,
+			range  = size_of(ShaderData),
+		}
+
+		writes := [?]vk.WriteDescriptorSet {
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = descriptorSets[i],
+				dstBinding = 0,
+				descriptorCount = 1,
+				descriptorType = .UNIFORM_BUFFER,
+				pBufferInfo = &bufferInfo,
+			},
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = descriptorSets[i],
+				dstBinding = 1,
+				descriptorCount = len(textures),
+				descriptorType = .COMBINED_IMAGE_SAMPLER,
+				pImageInfo = raw_data(textureDescriptors[:]),
+			},
+		}
+
+		vk.UpdateDescriptorSets(vkDevice, len(writes), raw_data(writes[:]), 0, nil)
+	}
 	VERT_CODE :: #load("../build/shaders/vert.spv")
 	FRAG_CODE :: #load("../build/shaders/frag.spv")
 
@@ -778,14 +867,14 @@ vulkan_init :: proc() {
 		vk.CreatePipelineLayout(
 			vkDevice,
 			&{
-				sType = .PIPELINE_LAYOUT_CREATE_INFO,
+				sType          = .PIPELINE_LAYOUT_CREATE_INFO,
 				setLayoutCount = 1,
-				pSetLayouts = &descriptorSetLayoutTex,
-				pushConstantRangeCount = 1,
-				pPushConstantRanges = &vk.PushConstantRange {
-					stageFlags = {.VERTEX},
-					size = size_of(vk.DeviceAddress),
-				},
+				pSetLayouts    = &descriptorSetLayoutTex,
+				// pushConstantRangeCount = 1,
+				// pPushConstantRanges = &vk.PushConstantRange {
+				// 	stageFlags = {.VERTEX},
+				// 	size = size_of(vk.DeviceAddress),
+				// },
 			},
 			nil,
 			&pipelineLayout,
@@ -891,9 +980,7 @@ vulkan_init :: proc() {
 	)
 	vk.DestroyShaderModule(vkDevice, vertModule, nil)
 	vk.DestroyShaderModule(vkDevice, fragModule, nil)
-
 }
-
 sdl_ensure :: proc(cond: bool, message: string = "") {
 	msg := fmt.tprintf("%s:%s\n", message, sdl.GetError())
 	ensure(cond, msg)
@@ -907,7 +994,7 @@ vk_chk :: proc(r: vk.Result) {
 		}
 	}
 }
-vulkan_render :: proc() {
+vulkan_render :: proc(c: ^Camera) {
 	vk_chk(vk.WaitForFences(vkDevice, 1, &fences[frameIndex], true, max(u64)))
 	vk_chk(vk.ResetFences(vkDevice, 1, &fences[frameIndex]))
 	vk_chk_swapchain(
@@ -920,14 +1007,10 @@ vulkan_render :: proc() {
 			&imageIndex,
 		),
 	)
+	view, proj := Camera_view_proj(c)
 	shaderData: ShaderData = {
-		projection = la.matrix4_perspective_f32(
-			math.RAD_PER_DEG * 45.0,
-			f32(screenWidth) / f32(screenHeight),
-			.1,
-			32,
-		),
-		view       = la.matrix4_look_at_f32({0, 0, 5}, {3, 0, 0}, {0, 1, 0}),
+		projection = proj,
+		view       = view,
 	}
 	shaderData.projection[1][1] *= -1
 	for &model, i in shaderData.model {
@@ -935,10 +1018,12 @@ vulkan_render :: proc() {
 			la.matrix4_translate_f32([3]f32{f32(i * 3), 0, 0}) *
 			la.identity_matrix(matrix[4, 4]f32)
 
-		mem.copy(shaderDataBuffers[frameIndex].mapped, &shaderData, size_of(shaderData))
-
 	}
-	cb := commandBuffers[frameIndex]
+
+	mem.copy(shaderDataBuffers[frameIndex].mapped, &shaderData, size_of(shaderData))
+
+
+	cb := drawCommandBuffers[frameIndex]
 	vk_chk(vk.ResetCommandBuffer(cb, {}))
 
 	vk_chk(
@@ -1019,21 +1104,30 @@ vulkan_render :: proc() {
 	vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D{extent = {width = screenWidth, height = screenHeight}})
 
 	vk.CmdBindPipeline(cb, .GRAPHICS, graphicsPipeline)
-	vk.CmdBindDescriptorSets(cb, .GRAPHICS, pipelineLayout, 0, 1, &descriptorSetTex, 0, nil)
+	vk.CmdBindDescriptorSets(
+		cb,
+		.GRAPHICS,
+		pipelineLayout,
+		0,
+		1,
+		&descriptorSets[frameIndex],
+		0,
+		nil,
+	)
 	vOffset := vk.DeviceSize(0)
 	vk.CmdBindVertexBuffers(cb, 0, 1, &vBuffer, &vOffset)
 
 	assert(vertexBufferSize != 0)
 	vk.CmdBindIndexBuffer(cb, vBuffer, vk.DeviceSize(vertexBufferSize), .UINT32)
 
-	vk.CmdPushConstants(
-		cb,
-		pipelineLayout,
-		{.VERTEX},
-		0,
-		size_of(vk.DeviceAddress),
-		&shaderDataBuffers[frameIndex].deviceAddress,
-	)
+	// vk.CmdPushConstants(
+	// 	cb,
+	// 	pipelineLayout,
+	// 	{.VERTEX},
+	// 	0,
+	// 	size_of(vk.DeviceAddress),
+	// 	&shaderDataBuffers[frameIndex].deviceAddress,
+	// )
 	assert(indicesCount != 0)
 	vk.CmdDrawIndexed(cb, indicesCount, 3, 0, 0, 0)
 	vk.CmdEndRendering(cb)
@@ -1090,107 +1184,104 @@ vulkan_render :: proc() {
 		),
 	)
 
-	if updateSwapchain {
-		updateSwapchain = false
 
-		vk_chk(vk.DeviceWaitIdle(vkDevice))
+}
+vulkan_update_swapchain :: proc() {
+	if updateSwapchain == false do return
+	vk_chk(vk.DeviceWaitIdle(vkDevice))
 
-		surfaceCaps: vk.SurfaceCapabilitiesKHR
-		vk_chk(
-			vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vkPhysicalDevice, vkSurface, &surfaceCaps),
-		)
+	surfaceCaps: vk.SurfaceCapabilitiesKHR
+	vk_chk(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(vkPhysicalDevice, vkSurface, &surfaceCaps))
 
-		oldSwapchain := vkSwapchain
+	oldSwapchain := vkSwapchain
 
-		swapchainCI := vk.SwapchainCreateInfoKHR {
-			sType = .SWAPCHAIN_CREATE_INFO_KHR,
-			surface = vkSurface,
-			minImageCount = surfaceCaps.minImageCount,
-			imageFormat = swapchainImageFormat,
-			imageColorSpace = .SRGB_NONLINEAR,
-			imageExtent = {width = screenWidth, height = screenHeight},
-			imageArrayLayers = 1,
-			imageUsage = {.COLOR_ATTACHMENT},
-			preTransform = {.IDENTITY},
-			compositeAlpha = {.OPAQUE},
-			presentMode = .FIFO,
-			oldSwapchain = oldSwapchain,
-		}
-
-		vk_chk(vk.CreateSwapchainKHR(vkDevice, &swapchainCI, nil, &vkSwapchain))
-
-		for view in vkSwpachainImageViews {
-			vk.DestroyImageView(vkDevice, view, nil)
-		}
-
-		vk_chk(vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, nil))
-		vkSwapchainImages = make([]vk.Image, vkImageCount)
-		vkSwpachainImageViews = make([]vk.ImageView, vkImageCount)
-		vk_chk(
-			vk.GetSwapchainImagesKHR(
-				vkDevice,
-				vkSwapchain,
-				&vkImageCount,
-				raw_data(vkSwapchainImages),
-			),
-		)
-
-		for i in 0 ..< vkImageCount {
-			viewCI := vk.ImageViewCreateInfo {
-				sType = .IMAGE_VIEW_CREATE_INFO,
-				image = vkSwapchainImages[i],
-				viewType = .D2,
-				format = swapchainImageFormat,
-				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
-			}
-
-			vk_chk(vk.CreateImageView(vkDevice, &viewCI, nil, &vkSwpachainImageViews[i]))
-		}
-
-		vk.DestroySwapchainKHR(vkDevice, oldSwapchain, nil)
-
-		vk.DestroyImageView(vkDevice, vkDepthImageView, nil)
-		vma.destroy_image(vkAllocator, vkDepthImage, vmaDepthStencilAlloc)
-
-		depthImageCI := vk.ImageCreateInfo {
-			sType = .IMAGE_CREATE_INFO,
-			imageType = .D2,
-			format = depthFormat,
-			extent = {width = screenWidth, height = screenHeight, depth = 1},
-			mipLevels = 1,
-			arrayLayers = 1,
-			samples = {._1},
-			tiling = .OPTIMAL,
-			usage = {.DEPTH_STENCIL_ATTACHMENT},
-		}
-
-		allocCI := vma.Allocation_Create_Info {
-			flags = {.Dedicated_Memory},
-			usage = .Auto,
-		}
-
-		vk_chk(
-			vma.create_image(
-				vkAllocator,
-				depthImageCI,
-				allocCI,
-				&vkDepthImage,
-				&vmaDepthStencilAlloc,
-				nil,
-			),
-		)
-
-		depthViewCI := vk.ImageViewCreateInfo {
-			sType = .IMAGE_VIEW_CREATE_INFO,
-			image = vkDepthImage,
-			viewType = .D2,
-			format = depthFormat,
-			subresourceRange = {aspectMask = {.DEPTH}, levelCount = 1, layerCount = 1},
-		}
-
-		vk_chk(vk.CreateImageView(vkDevice, &depthViewCI, nil, &vkDepthImageView))
+	swapchainCI := vk.SwapchainCreateInfoKHR {
+		sType = .SWAPCHAIN_CREATE_INFO_KHR,
+		surface = vkSurface,
+		minImageCount = surfaceCaps.minImageCount,
+		imageFormat = swapchainImageFormat,
+		imageColorSpace = swapchainColorSpace,
+		imageExtent = {width = screenWidth, height = screenHeight},
+		imageArrayLayers = 1,
+		imageUsage = {.COLOR_ATTACHMENT},
+		preTransform = {.IDENTITY},
+		compositeAlpha = {.OPAQUE},
+		presentMode = .FIFO,
+		oldSwapchain = oldSwapchain,
 	}
 
+	vk_chk(vk.CreateSwapchainKHR(vkDevice, &swapchainCI, nil, &vkSwapchain))
+
+	for view in vkSwpachainImageViews {
+		vk.DestroyImageView(vkDevice, view, nil)
+	}
+
+	vk_chk(vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, nil))
+	vkSwapchainImages = make([]vk.Image, vkImageCount)
+	vkSwpachainImageViews = make([]vk.ImageView, vkImageCount)
+	vk_chk(
+		vk.GetSwapchainImagesKHR(
+			vkDevice,
+			vkSwapchain,
+			&vkImageCount,
+			raw_data(vkSwapchainImages),
+		),
+	)
+
+	for i in 0 ..< vkImageCount {
+		viewCI := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = vkSwapchainImages[i],
+			viewType = .D2,
+			format = swapchainImageFormat,
+			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+		}
+
+		vk_chk(vk.CreateImageView(vkDevice, &viewCI, nil, &vkSwpachainImageViews[i]))
+	}
+
+	vk.DestroySwapchainKHR(vkDevice, oldSwapchain, nil)
+
+	vk.DestroyImageView(vkDevice, vkDepthImageView, nil)
+	vma.destroy_image(vkAllocator, vkDepthImage, vmaDepthStencilAlloc)
+
+	depthImageCI := vk.ImageCreateInfo {
+		sType = .IMAGE_CREATE_INFO,
+		imageType = .D2,
+		format = depthFormat,
+		extent = {width = screenWidth, height = screenHeight, depth = 1},
+		mipLevels = 1,
+		arrayLayers = 1,
+		samples = {._1},
+		tiling = .OPTIMAL,
+		usage = {.DEPTH_STENCIL_ATTACHMENT},
+	}
+
+	allocCI := vma.Allocation_Create_Info {
+		flags = {.Dedicated_Memory},
+		usage = .Auto,
+	}
+
+	vk_chk(
+		vma.create_image(
+			vkAllocator,
+			depthImageCI,
+			allocCI,
+			&vkDepthImage,
+			&vmaDepthStencilAlloc,
+			nil,
+		),
+	)
+
+	depthViewCI := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = vkDepthImage,
+		viewType = .D2,
+		format = depthFormat,
+		subresourceRange = {aspectMask = {.DEPTH}, levelCount = 1, layerCount = 1},
+	}
+
+	vk_chk(vk.CreateImageView(vkDevice, &depthViewCI, nil, &vkDepthImageView))
 }
 vk_chk_swapchain :: proc(r: vk.Result) {
 	if r != .SUCCESS {

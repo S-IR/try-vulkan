@@ -1,7 +1,7 @@
 #version 460 core
 #extension GL_EXT_nonuniform_qualifier : require
-#extension GL_EXT_buffer_reference : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// #extension GL_EXT_buffer_reference : require
+// #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 struct ShaderData {
     mat4 projection;
@@ -11,13 +11,17 @@ struct ShaderData {
     uint selected;
 };
 
-layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ShaderDataRef {
+layout(set = 0, binding = 0) uniform UniformBuffer {
     ShaderData data;
-};
+} ubo;
 
-layout(push_constant) uniform PushConstants {
-    uint64_t shaderDataAddr;
-} pc;
+// layout(buffer_referenc  e, std430, buffer_reference_align = 16) readonly buffer ShaderDataRef {
+//     ShaderData data;
+// };
+
+// layout(push_constant) uniform PushConstants {
+//     uint64_t shaderDataAddr;
+// } pc;
 
 #ifdef VERTEX
 layout(location = 0) in vec3 inPos;
@@ -30,12 +34,9 @@ layout(location = 3) out vec3 vLightVec;
 layout(location = 4) out vec3 vViewVec;
 layout(location = 5) flat out uint vInstanceIndex;
 
-layout(set = 0, binding = 0) uniform sampler2D textures[];
-
 void main()
 {
-    ShaderDataRef ref = ShaderDataRef(pc.shaderDataAddr);
-    ShaderData data = ref.data;
+    ShaderData data = ubo.data;
 
     mat4 modelMat = data.model[gl_InstanceIndex];
     vec3 worldNormal = mat3(modelMat) * inNormal;
@@ -62,7 +63,7 @@ layout(location = 4) in vec3 vViewVec;
 layout(location = 5) flat in uint vInstanceIndex;
 layout(location = 0) out vec4 outColor;
 
-layout(set = 0, binding = 0) uniform sampler2D textures[];
+layout(set = 0, binding = 1) uniform sampler2D textures[];
 
 void main()
 {

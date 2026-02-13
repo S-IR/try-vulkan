@@ -1,8 +1,6 @@
 package obj
 
-import "core:fmt"
 import "core:os"
-import "core:slice"
 import "core:strconv"
 import "core:strings"
 

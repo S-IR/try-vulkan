@@ -1,8 +1,10 @@
 package main
-import ktx "../modules/libktx"
 import "../modules/vma"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
+
+dt: f64
+
 
 window: ^sdl.Window
 screenWidth: u32 = 1280
@@ -11,7 +13,7 @@ screenHeight: u32 = 720
 MAX_FRAMES_IN_FLIGHT: u32 : 2
 
 swapchainImageFormat: vk.Format = .B8G8R8A8_SRGB
-
+swapchainColorSpace: vk.ColorSpaceKHR = .SRGB_NONLINEAR
 depthFormat: vk.Format = .UNDEFINED
 
 updateSwapchain := false
@@ -29,6 +31,7 @@ vkDepthImage: vk.Image
 vmaDepthStencilAlloc: vma.Allocation
 vkDepthImageView: vk.ImageView
 
+vkGraphicsQueueFamilyIndex: u32 = 0
 ShaderData :: struct {
 	projection: matrix[4, 4]f32,
 	view:       matrix[4, 4]f32,
@@ -42,8 +45,11 @@ ShaderDataBuffer :: struct {
 	deviceAddress: vk.DeviceAddress,
 	mapped:        rawptr,
 }
+
+descriptorSets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
+
 shaderDataBuffers := [MAX_FRAMES_IN_FLIGHT]ShaderDataBuffer{}
-commandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
+drawCommandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
 fences := [MAX_FRAMES_IN_FLIGHT]vk.Fence{}
 presentSemaphores := [MAX_FRAMES_IN_FLIGHT]vk.Semaphore{}
 renderSemaphores: []vk.Semaphore = nil

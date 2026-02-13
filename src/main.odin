@@ -1,6 +1,5 @@
 package main
 
-import ktx "../modules/libktx"
 import "../modules/vma"
 import "core:fmt"
 import "core:log"
@@ -12,6 +11,7 @@ import "core:strings"
 import "core:time"
 import "obj"
 import sdl "vendor:sdl3"
+import image "vendor:stb/image"
 import vk "vendor:vulkan"
 
 main :: proc() {
@@ -521,28 +521,29 @@ pipeline_init :: proc() {
 
 
 	for &texture, i in textures {
-		ktxTexture: ^ktx.Texture
-		ktx.Texture_CreateFromNamedFile(
+		width, height, channels: i32
+		pixels := image.load(
 			strings.clone_to_cstring(
-				filepath.join({"assets", fmt.tprintf("suzanne%d.ktx", i)}, context.temp_allocator),
+				filepath.join({"assets", fmt.tprintf("suzanne%d.png", i)}),
 				context.temp_allocator,
 			),
-			{.TEXTURE_CREATE_LOAD_IMAGE_DATA},
-			&ktxTexture,
+			&width,
+			&height,
+			&channels,
+			4,
 		)
+		imageFormat: vk.Format = .B8G8R8A8_SRGB
+
+		ensure(pixels != nil)
 		vk_chk(
 			vma.create_image(
 				vkAllocator,
 				{
 					sType = .IMAGE_CREATE_INFO,
 					imageType = .D2,
-					format = ktx.Texture_GetVkFormat(ktxTexture),
-					extent = {
-						width = ktxTexture.baseWidth,
-						height = ktxTexture.baseHeight,
-						depth = 1,
-					},
-					mipLevels = ktxTexture.numLevels,
+					format = imageFormat,
+					extent = {width = u32(width), height = u32(height), depth = 1},
+					mipLevels = 1,
 					arrayLayers = 1,
 					samples = {._1},
 					tiling = .OPTIMAL,
@@ -563,7 +564,7 @@ pipeline_init :: proc() {
 				vkAllocator,
 				{
 					sType = .BUFFER_CREATE_INFO,
-					size = vk.DeviceSize(ktxTexture.dataSize),
+					size = vk.DeviceSize(width * height * 4),
 					usage = {.TRANSFER_SRC},
 				},
 				{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
@@ -574,7 +575,7 @@ pipeline_init :: proc() {
 		)
 		imgSrcBufferPtr: rawptr
 		vk_chk(vma.map_memory(vkAllocator, imgSrcAllocation, &imgSrcBufferPtr))
-		mem.copy(imgSrcBufferPtr, ktxTexture.pData, int(ktxTexture.dataSize))
+		mem.copy(imgSrcBufferPtr, pixels, int(width) * int(height) * 4)
 
 		fenceOneTime: vk.Fence
 		vk_chk(vk.CreateFence(vkDevice, &{sType = .FENCE_CREATE_INFO}, nil, &fenceOneTime))
@@ -584,10 +585,10 @@ pipeline_init :: proc() {
 		vk_chk(
 			vk.AllocateCommandBuffers(
 				vkDevice,
-				&{
+				&vk.CommandBufferAllocateInfo {
 					sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-					commandBufferCount = 1,
 					commandPool = vkCommandPool,
+					commandBufferCount = 1,
 				},
 				&cbOneTime,
 			),
@@ -595,12 +596,14 @@ pipeline_init :: proc() {
 		vk_chk(
 			vk.BeginCommandBuffer(
 				cbOneTime,
-				&{sType = .COMMAND_BUFFER_BEGIN_INFO, flags = {.ONE_TIME_SUBMIT}},
+				&vk.CommandBufferBeginInfo {
+					sType = .COMMAND_BUFFER_BEGIN_INFO,
+					flags = {.ONE_TIME_SUBMIT},
+				},
 			),
 		)
 
-
-		barrierTexImage := vk.ImageMemoryBarrier2 {
+		barrier := vk.ImageMemoryBarrier2 {
 			sType = .IMAGE_MEMORY_BARRIER_2,
 			srcStageMask = {},
 			srcAccessMask = {},
@@ -609,55 +612,32 @@ pipeline_init :: proc() {
 			oldLayout = .UNDEFINED,
 			newLayout = .TRANSFER_DST_OPTIMAL,
 			image = texture.image,
-			subresourceRange = {
-				aspectMask = {.COLOR},
-				levelCount = ktxTexture.numLevels,
-				layerCount = 1,
-			},
+			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
 		}
-
 		vk.CmdPipelineBarrier2(
 			cbOneTime,
-			&{
+			&vk.DependencyInfo {
 				sType = .DEPENDENCY_INFO,
 				imageMemoryBarrierCount = 1,
-				pImageMemoryBarriers = &barrierTexImage,
+				pImageMemoryBarriers = &barrier,
 			},
 		)
 
-		copyRegions := make(
-			[dynamic]vk.BufferImageCopy,
-			0,
-			ktxTexture.numLevels,
-			context.temp_allocator,
-		)
-		for j in 0 ..< ktxTexture.numLevels {
-			mipOffset: uint
-			ktx.Texture_GetImageOffset(ktxTexture, j, 0, 0, &mipOffset)
-			append(
-				&copyRegions,
-				vk.BufferImageCopy {
-					bufferOffset = vk.DeviceSize(mipOffset),
-					imageSubresource = {aspectMask = {.COLOR}, mipLevel = u32(j), layerCount = 1},
-					imageExtent = {
-						width = u32(ktxTexture.baseWidth >> j),
-						height = u32(ktxTexture.baseHeight >> j),
-						depth = 1,
-					},
-				},
-			)
+		copyRegion := vk.BufferImageCopy {
+			bufferOffset = 0,
+			imageSubresource = {aspectMask = {.COLOR}, mipLevel = 0, layerCount = 1},
+			imageExtent = {width = u32(width), height = u32(height), depth = 1},
 		}
-
 		vk.CmdCopyBufferToImage(
 			cbOneTime,
 			imgSrcBuffer,
 			texture.image,
 			.TRANSFER_DST_OPTIMAL,
-			u32(len(copyRegions)),
-			raw_data(copyRegions),
+			1,
+			&copyRegion,
 		)
 
-		barrierTexImage = vk.ImageMemoryBarrier2 {
+		barrier = vk.ImageMemoryBarrier2 {
 			sType = .IMAGE_MEMORY_BARRIER_2,
 			srcStageMask = {.TRANSFER},
 			srcAccessMask = {.TRANSFER_WRITE},
@@ -666,43 +646,18 @@ pipeline_init :: proc() {
 			oldLayout = .TRANSFER_DST_OPTIMAL,
 			newLayout = .READ_ONLY_OPTIMAL,
 			image = texture.image,
-			subresourceRange = {
-				aspectMask = {.COLOR},
-				levelCount = ktxTexture.numLevels,
-				layerCount = 1,
-			},
+			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
 		}
-
 		vk.CmdPipelineBarrier2(
 			cbOneTime,
-			&{
+			&vk.DependencyInfo {
 				sType = .DEPENDENCY_INFO,
 				imageMemoryBarrierCount = 1,
-				pImageMemoryBarriers = &barrierTexImage,
+				pImageMemoryBarriers = &barrier,
 			},
 		)
-		vk_chk(
-			vk.CreateImageView(
-				vkDevice,
-				&vk.ImageViewCreateInfo {
-					sType = .IMAGE_VIEW_CREATE_INFO,
-					image = texture.image,
-					viewType = .D2,
-					format = ktx.Texture_GetVkFormat(ktxTexture),
-					subresourceRange = {
-						aspectMask = {.COLOR},
-						baseMipLevel = 0,
-						levelCount = ktxTexture.numLevels,
-						baseArrayLayer = 0,
-						layerCount = 1,
-					},
-				},
-				nil,
-				&texture.view,
-			),
-		)
-		vk_chk(vk.EndCommandBuffer(cbOneTime))
 
+		vk_chk(vk.EndCommandBuffer(cbOneTime))
 		vk_chk(
 			vk.QueueSubmit(
 				vkQueue,
@@ -715,33 +670,53 @@ pipeline_init :: proc() {
 				fenceOneTime,
 			),
 		)
-
 		vk_chk(vk.WaitForFences(vkDevice, 1, &fenceOneTime, true, max(u64)))
-		vk.ResetFences(vkDevice, 1, &fenceOneTime)
+
 		vk.FreeCommandBuffers(vkDevice, vkCommandPool, 1, &cbOneTime)
 		vma.unmap_memory(vkAllocator, imgSrcAllocation)
 		vma.destroy_buffer(vkAllocator, imgSrcBuffer, imgSrcAllocation)
 
-		ktx.Texture_Destroy(ktxTexture)
+
 		vk.DestroyFence(vkDevice, fenceOneTime, nil)
 
+		vk_chk(
+			vk.CreateImageView(
+				vkDevice,
+				&vk.ImageViewCreateInfo {
+					sType = .IMAGE_VIEW_CREATE_INFO,
+					image = texture.image,
+					viewType = .D2,
+					format = imageFormat,
+					subresourceRange = {
+						aspectMask = {.COLOR},
+						baseMipLevel = 0,
+						levelCount = 1,
+						baseArrayLayer = 0,
+						layerCount = 1,
+					},
+				},
+				nil,
+				&texture.view,
+			),
+		)
 
 		vk_chk(
 			vk.CreateSampler(
 				vkDevice,
-				&{
+				&vk.SamplerCreateInfo {
 					sType = .SAMPLER_CREATE_INFO,
 					magFilter = .LINEAR,
 					minFilter = .LINEAR,
 					mipmapMode = .LINEAR,
 					anisotropyEnable = true,
 					maxAnisotropy = 8.0,
-					maxLod = f32(ktxTexture.numLevels),
+					maxLod = 1.0,
 				},
 				nil,
 				&texture.sampler,
 			),
 		)
+
 		textureDescriptors[i] = {
 			sampler     = texture.sampler,
 			imageView   = texture.view,

@@ -1,5 +1,5 @@
-build/*
-!build/images/
-*.pdb
-*.dll
 *.exe
+build/
+*.pdb
+*.ddl
+    

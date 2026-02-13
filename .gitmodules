@@ -1,6 +1,3 @@
 [submodule "modules/vma"]
 	path = modules/vma
 	url = https://github.com/Capati/odin-vma.git
-[submodule "modules/libktx"]
-	path = modules/libktx
-	url = https://github.com/DanielGavin/odin-libktx.git

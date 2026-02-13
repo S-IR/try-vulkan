@@ -14,6 +14,9 @@ import sdl "vendor:sdl3"
 import image "vendor:stb/image"
 import vk "vendor:vulkan"
 
+MAX_TEXTURES :: 8
+
+
 main :: proc() {
 
 	sdl_ensure(sdl.Init({.VIDEO, .EVENTS}))
@@ -216,7 +219,7 @@ vulkan_init :: proc() {
 		shaderSampledImageArrayNonUniformIndexing = true,
 		descriptorBindingVariableDescriptorCount  = true,
 		runtimeDescriptorArray                    = true,
-		// bufferDeviceAddress                       = true,
+		bufferDeviceAddress                       = true,
 	}
 	enabledVk13Features := vk.PhysicalDeviceVulkan13Features {
 		sType            = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -224,7 +227,10 @@ vulkan_init :: proc() {
 		synchronization2 = true,
 		dynamicRendering = true,
 	}
-	deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+	deviceExtensions := [?]cstring {
+		vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+		vk.KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+	}
 	enabledVk10Features := vk.PhysicalDeviceFeatures {
 		samplerAnisotropy = true,
 		shaderInt64       = true,
@@ -245,7 +251,7 @@ vulkan_init :: proc() {
 	vk_chk(
 		vma.create_allocator(
 			{
-				flags = {},
+				flags = {.Buffer_Device_Address},
 				physical_device = vkPhysicalDevice,
 				device = vkDevice,
 				instance = vkInstance,
@@ -406,7 +412,7 @@ vulkan_init :: proc() {
 				{
 					sType = .BUFFER_CREATE_INFO,
 					size = size_of(ShaderData),
-					usage = {.UNIFORM_BUFFER},
+					usage = {.UNIFORM_BUFFER, .SHADER_DEVICE_ADDRESS},
 				},
 				{
 					flags = {
@@ -428,6 +434,12 @@ vulkan_init :: proc() {
 				&shaderDataBuffers[i].mapped,
 			),
 		)
+		addr_info := vk.BufferDeviceAddressInfo {
+			sType  = .BUFFER_DEVICE_ADDRESS_INFO,
+			buffer = shaderDataBuffers[i].buffer,
+		}
+		shaderDataBuffers[i].deviceAddress = vk.GetBufferDeviceAddress(vkDevice, &addr_info)
+
 
 	}
 	semaphoreCI := vk.SemaphoreCreateInfo {
@@ -724,36 +736,22 @@ pipeline_init :: proc() {
 		}
 
 	}
-	descVariableFlags := [?]vk.DescriptorBindingFlags{{}, {.VARIABLE_DESCRIPTOR_COUNT}}
-
 
 	descLayoutBindings := [?]vk.DescriptorSetLayoutBinding {
 		{
 			binding = 0,
-			descriptorType = .UNIFORM_BUFFER,
-			descriptorCount = 1,
-			stageFlags = {.VERTEX},
-		},
-		{
-			binding = 1,
 			descriptorType = .COMBINED_IMAGE_SAMPLER,
-			descriptorCount = len(textures),
+			descriptorCount = MAX_TEXTURES,
 			stageFlags = {.FRAGMENT},
 		},
-	}
-
-	descBindingFlags := vk.DescriptorSetLayoutBindingFlagsCreateInfo {
-		sType         = .DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
-		bindingCount  = len(descLayoutBindings),
-		pBindingFlags = raw_data(descVariableFlags[:]),
 	}
 
 	vk_chk(
 		vk.CreateDescriptorSetLayout(
 			vkDevice,
-			&{
+			&vk.DescriptorSetLayoutCreateInfo {
 				sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-				pNext = &descBindingFlags,
+				flags = {.PUSH_DESCRIPTOR_KHR},
 				bindingCount = len(descLayoutBindings),
 				pBindings = raw_data(descLayoutBindings[:]),
 			},
@@ -761,77 +759,7 @@ pipeline_init :: proc() {
 			&descriptorSetLayoutTex,
 		),
 	)
-	poolSizes := [?]vk.DescriptorPoolSize {
-		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = len(textures) * MAX_FRAMES_IN_FLIGHT},
-		{type = .UNIFORM_BUFFER, descriptorCount = MAX_FRAMES_IN_FLIGHT},
-	}
-	vk_chk(
-		vk.CreateDescriptorPool(
-			vkDevice,
-			&{
-				sType = .DESCRIPTOR_POOL_CREATE_INFO,
-				maxSets = MAX_FRAMES_IN_FLIGHT,
-				poolSizeCount = len(poolSizes),
-				pPoolSizes = raw_data(poolSizes[:]),
-			},
-			nil,
-			&descriptorPool,
-		),
-	)
-	variableDescCount: u32 = len(textures)
-	layouts := [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout{}
-	for &l in layouts do l = descriptorSetLayoutTex
 
-	variableCounts := [MAX_FRAMES_IN_FLIGHT]u32{}
-	for &c in variableCounts do c = variableDescCount
-
-
-	vk_chk(
-		vk.AllocateDescriptorSets(
-			vkDevice,
-			&{
-				sType = .DESCRIPTOR_SET_ALLOCATE_INFO,
-				descriptorPool = descriptorPool,
-				descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
-				pSetLayouts = raw_data(layouts[:]),
-				pNext = &vk.DescriptorSetVariableDescriptorCountAllocateInfo {
-					sType = .DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO,
-					descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
-					pDescriptorCounts = raw_data(variableCounts[:]),
-				},
-			},
-			raw_data(descriptorSets[:]),
-		),
-	)
-
-	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
-		bufferInfo := vk.DescriptorBufferInfo {
-			buffer = shaderDataBuffers[i].buffer,
-			offset = 0,
-			range  = size_of(ShaderData),
-		}
-
-		writes := [?]vk.WriteDescriptorSet {
-			{
-				sType = .WRITE_DESCRIPTOR_SET,
-				dstSet = descriptorSets[i],
-				dstBinding = 0,
-				descriptorCount = 1,
-				descriptorType = .UNIFORM_BUFFER,
-				pBufferInfo = &bufferInfo,
-			},
-			{
-				sType = .WRITE_DESCRIPTOR_SET,
-				dstSet = descriptorSets[i],
-				dstBinding = 1,
-				descriptorCount = len(textures),
-				descriptorType = .COMBINED_IMAGE_SAMPLER,
-				pImageInfo = raw_data(textureDescriptors[:]),
-			},
-		}
-
-		vk.UpdateDescriptorSets(vkDevice, len(writes), raw_data(writes[:]), 0, nil)
-	}
 	VERT_CODE :: #load("../build/shaders/vert.spv")
 	FRAG_CODE :: #load("../build/shaders/frag.spv")
 
@@ -842,14 +770,14 @@ pipeline_init :: proc() {
 		vk.CreatePipelineLayout(
 			vkDevice,
 			&{
-				sType          = .PIPELINE_LAYOUT_CREATE_INFO,
+				sType = .PIPELINE_LAYOUT_CREATE_INFO,
 				setLayoutCount = 1,
-				pSetLayouts    = &descriptorSetLayoutTex,
-				// pushConstantRangeCount = 1,
-				// pPushConstantRanges = &vk.PushConstantRange {
-				// 	stageFlags = {.VERTEX},
-				// 	size = size_of(vk.DeviceAddress),
-				// },
+				pSetLayouts = &descriptorSetLayoutTex,
+				pushConstantRangeCount = 1,
+				pPushConstantRanges = &vk.PushConstantRange {
+					stageFlags = {.VERTEX},
+					size = size_of(vk.DeviceAddress),
+				},
 			},
 			nil,
 			&pipelineLayout,
@@ -1079,15 +1007,39 @@ vulkan_render :: proc(c: ^Camera) {
 	vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D{extent = {width = screenWidth, height = screenHeight}})
 
 	vk.CmdBindPipeline(cb, .GRAPHICS, graphicsPipeline)
-	vk.CmdBindDescriptorSets(
+	assert(len(textures) < MAX_TEXTURES)
+	allDescriptors: [MAX_TEXTURES]vk.DescriptorImageInfo
+	for i in 0 ..< MAX_TEXTURES {
+		allDescriptors[i] = textureDescriptors[i % len(textures)]
+	}
+
+	setsToWrite := [?]vk.WriteDescriptorSet {
+		{
+			sType = .WRITE_DESCRIPTOR_SET,
+			dstBinding = 0,
+			dstArrayElement = 0,
+			descriptorCount = MAX_TEXTURES,
+			descriptorType = .COMBINED_IMAGE_SAMPLER,
+			pImageInfo = raw_data(allDescriptors[:]),
+		},
+	}
+	vk.CmdPushDescriptorSetKHR(
 		cb,
 		.GRAPHICS,
 		pipelineLayout,
 		0,
-		1,
-		&descriptorSets[frameIndex],
+		len(setsToWrite),
+		raw_data(setsToWrite[:]),
+	)
+
+
+	vk.CmdPushConstants(
+		cb,
+		pipelineLayout,
+		{.VERTEX},
 		0,
-		nil,
+		size_of(vk.DeviceAddress),
+		&shaderDataBuffers[frameIndex].deviceAddress,
 	)
 	vOffset := vk.DeviceSize(0)
 	vk.CmdBindVertexBuffers(cb, 0, 1, &vBuffer, &vOffset)
@@ -1290,7 +1242,6 @@ vulkan_cleanup :: proc() {
 		if s != {} do vk.DestroySemaphore(vkDevice, s, nil)
 	}
 
-	// Depth buffer
 	if vkDepthImageView != {} do vk.DestroyImageView(vkDevice, vkDepthImageView, nil)
 
 	if vkDepthImage != {} do vma.destroy_image(vkAllocator, vkDepthImage, vmaDepthStencilAlloc)
@@ -1314,7 +1265,6 @@ vulkan_cleanup :: proc() {
 
 	if descriptorSetLayoutTex != {} do vk.DestroyDescriptorSetLayout(vkDevice, descriptorSetLayoutTex, nil)
 
-	if descriptorPool != {} do vk.DestroyDescriptorPool(vkDevice, descriptorPool, nil)
 
 	if pipelineLayout != {} do vk.DestroyPipelineLayout(vkDevice, pipelineLayout, nil)
 

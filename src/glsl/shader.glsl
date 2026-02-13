@@ -1,7 +1,7 @@
 #version 460 core
-#extension GL_EXT_nonuniform_qualifier : require
-// #extension GL_EXT_buffer_reference : require
-// #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// #extension GL_EXT_nonuniform_qualifie    r : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 struct ShaderData {
     mat4 projection;
@@ -11,17 +11,17 @@ struct ShaderData {
     uint selected;
 };
 
-layout(set = 0, binding = 0) uniform UniformBuffer {
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ShaderDataRef {
     ShaderData data;
-} ubo;
+};
 
-// layout(buffer_referenc  e, std430, buffer_reference_align = 16) readonly buffer ShaderDataRef {
-//     ShaderData data;
-// };
+layout(push_constant) uniform PushConstants {
+    uint64_t shaderDataAddr;
+} pc;
 
-// layout(push_constant) uniform PushConstants {
-//     uint64_t shaderDataAddr;
-// } pc;
+#define MAX_TEXTURES 8   
+
+layout(set = 0, binding = 0) uniform sampler2D textures[MAX_TEXTURES];
 
 #ifdef VERTEX
 layout(location = 0) in vec3 inPos;
@@ -34,9 +34,11 @@ layout(location = 3) out vec3 vLightVec;
 layout(location = 4) out vec3 vViewVec;
 layout(location = 5) flat out uint vInstanceIndex;
 
+
 void main()
 {
-    ShaderData data = ubo.data;
+    ShaderDataRef ref = ShaderDataRef(pc.shaderDataAddr);
+    ShaderData data = ref.data;
 
     mat4 modelMat = data.model[gl_InstanceIndex];
     vec3 worldNormal = mat3(modelMat) * inNormal;
@@ -63,7 +65,6 @@ layout(location = 4) in vec3 vViewVec;
 layout(location = 5) flat in uint vInstanceIndex;
 layout(location = 0) out vec4 outColor;
 
-layout(set = 0, binding = 1) uniform sampler2D textures[];
 
 void main()
 {
@@ -73,7 +74,7 @@ void main()
     vec3 R = reflect(-L, N);
     float diffuse = max(dot(N, L), 0.0025);
     float specular = pow(max(dot(R, V), 0.0), 16.0) * 0.75;
-    vec3 texColor = texture(textures[nonuniformEXT(vInstanceIndex)], vUV).rgb;
+    vec3 texColor = texture(textures[vInstanceIndex], vUV).rgb;
     vec3 finalColor = (diffuse * texColor + specular) * vFactor;
     outColor = vec4(finalColor, 1.0);
 }

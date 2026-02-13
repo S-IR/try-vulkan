@@ -47,7 +47,7 @@ ShaderDataBuffer :: struct {
 	mapped:        rawptr,
 }
 
-descriptorSets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
+// descriptorSets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
 
 shaderDataBuffers := [MAX_FRAMES_IN_FLIGHT]ShaderDataBuffer{}
 drawCommandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
@@ -74,8 +74,8 @@ imageIndex: u32 = 0
 textures: [3]texture
 textureDescriptors: [3]vk.DescriptorImageInfo
 descriptorSetLayoutTex: vk.DescriptorSetLayout
-descriptorPool: vk.DescriptorPool
-descriptorSetTex: vk.DescriptorSet
+// descriptorPool: vk.DescriptorPool
+// descriptorSetTex: vk.DescriptorSet
 
 pipelineLayout: vk.PipelineLayout
 graphicsPipeline: vk.Pipeline

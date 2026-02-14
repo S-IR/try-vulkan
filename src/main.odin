@@ -57,6 +57,8 @@ main :: proc() {
 
 	lastFrameTime := time.now()
 	camera := Camera_new()
+
+	defer vk.DeviceWaitIdle(vkDevice)
 	for !quit {
 
 		defer free_all(context.temp_allocator)
@@ -777,7 +779,6 @@ vk_chk_swapchain :: proc(r: vk.Result) {
 	}
 }
 vulkan_cleanup :: proc() {
-	vk.DeviceWaitIdle(vkDevice)
 
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		if fences[i] != {} do vk.DestroyFence(vkDevice, fences[i], nil)

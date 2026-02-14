@@ -68,6 +68,16 @@ read_gltf_model :: proc(
 		if node.mesh == nil do continue
 
 		mesh := node.mesh
+		localMat: matrix[4, 4]f32
+
+		if node.has_matrix {
+			mem.copy(&localMat, &node.matrix_, size_of(localMat))
+		} else {
+			flat: [16]f32
+			c.node_transform_local(node, raw_data(flat[:]))
+			localMat = transmute(matrix[4, 4]f32)flat
+		}
+
 		for primitive in mesh.primitives {
 
 			primInfo := GltfPrimitive {
@@ -239,6 +249,8 @@ read_gltf_model :: proc(
 			vertexPtr: rawptr
 			vma.map_memory(vkAllocator, renderObj.primitive.vertexAlloc, &vertexPtr)
 			mem.copy(vertexPtr, raw_data(primInfo.vertices), vertexBufferSize)
+			defer vma.unmap_memory(vkAllocator, renderObj.primitive.vertexAlloc)
+
 
 			vertexCount := len(primInfo.vertices)
 			assert(vertexCount < int(max(u32)))
@@ -268,6 +280,7 @@ read_gltf_model :: proc(
 			)
 			indexPtr: ^u8
 			vma.map_memory(vkAllocator, renderObj.primitive.indexAlloc, (^rawptr)(&indexPtr))
+			defer vma.unmap_memory(vkAllocator, renderObj.primitive.indexAlloc)
 
 			mem.copy(
 				indexPtr,
@@ -288,7 +301,7 @@ read_gltf_model :: proc(
 			case:
 				unreachable()
 			}
-
+			renderObj.primitive.transform = localMat
 			append(&model.renderObjs, renderObj)
 
 
@@ -299,8 +312,12 @@ read_gltf_model :: proc(
 }
 model_destroy :: proc(m: Model) {
 	for obj in m.renderObjs {
-		if obj.primitive.vertexBuffer != {} do vma.destroy_buffer(vkAllocator, obj.primitive.vertexBuffer, obj.primitive.vertexAlloc)
-		if obj.primitive.indexBuffer != {} do vma.destroy_buffer(vkAllocator, obj.primitive.indexBuffer, obj.primitive.indexAlloc)
+		if obj.primitive.vertexBuffer != {} {
+			vma.destroy_buffer(vkAllocator, obj.primitive.vertexBuffer, obj.primitive.vertexAlloc)
+		}
+		if obj.primitive.indexBuffer != {} {
+			vma.destroy_buffer(vkAllocator, obj.primitive.indexBuffer, obj.primitive.indexAlloc)
+		}
 		view := obj.material.baseColorTexture.descriptor.imageView
 		if view != {} do vk.DestroyImageView(vkDevice, view, nil)
 

@@ -194,11 +194,11 @@ model_draw :: proc(cb: vk.CommandBuffer, c: ^Camera, model: Model, pipeline: Mod
 
 	allDescriptors: [MAX_TEXTURES]vk.DescriptorImageInfo
 
-	for &obj, i in model.renderObjs {
+	for &obj in model.renderObjs {
 		for j in 0 ..< MAX_TEXTURES {
 			allDescriptors[j] = obj.material.baseColorTexture.descriptor
 		}
-		modelMatrix := la.matrix4_translate_f32([3]f32{1, 0, 0}) * la.MATRIX4F32_IDENTITY
+		modelMatrix := obj.primitive.transform * la.MATRIX4F32_IDENTITY
 		vk.CmdPushConstants(
 			cb,
 			pipeline.layout,

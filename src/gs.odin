@@ -1,6 +1,7 @@
 package main
 
 import "../modules/vma"
+import "core:container/small_array"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
@@ -36,7 +37,6 @@ vkGraphicsQueueFamilyIndex: u32 = 0
 ShaderData :: struct {
 	projection: matrix[4, 4]f32,
 	view:       matrix[4, 4]f32,
-	model:      [3]matrix[4, 4]f32,
 	lightPos:   [4]f32,
 }
 ShaderDataBuffer :: struct {
@@ -56,25 +56,34 @@ renderSemaphores: []vk.Semaphore = nil
 vkCommandPool: vk.CommandPool
 vkCommandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
 
-vBuffer: vk.Buffer
-vertexBufferSize := 0
-indicesCount: u32 = 0
-vBufferAllocation: vma.Allocation
+// vBuffer: vk.Buffer
+// vertexBufferSize := 0
+// indicesCount: u32 = 0
+// vBufferAllocation: vma.Allocation
 
-texture :: struct {
-	image:      vk.Image,
-	view:       vk.ImageView,
-	sampler:    vk.Sampler,
-	allocation: vma.Allocation,
-}
 
 frameIndex: u32 = 0
 imageIndex: u32 = 0
-textures: [3]texture
+// textures: [3]texture
 textureDescriptors: [3]vk.DescriptorImageInfo
-descriptorSetLayoutTex: vk.DescriptorSetLayout
+// descriptorSetLayoutTex: vk.DescriptorSetLayout
 // descriptorPool: vk.DescriptorPool
 // descriptorSetTex: vk.DescriptorSet
 
-pipelineLayout: vk.PipelineLayout
-graphicsPipeline: vk.Pipeline
+// pipelineLayout: vk.PipelineLayout
+// graphicsPipeline: vk.Pipeline
+
+VK_BUFFER_POOL_MAX_ALLOCATIONS :: 1024
+
+VkBufferPoolElem :: struct {
+	buffer: vk.Buffer,
+	alloc:  vma.Allocation,
+}
+vkBufferPool: small_array.Small_Array(VK_BUFFER_POOL_MAX_ALLOCATIONS, VkBufferPoolElem) = {}
+vk_buffer_pool_clear :: proc() {
+	for e in small_array.slice(&vkBufferPool) {
+		vma.unmap_memory(vkAllocator, e.alloc)
+		vma.destroy_buffer(vkAllocator, e.buffer, e.alloc)
+	}
+	small_array.clear(&vkBufferPool)
+}

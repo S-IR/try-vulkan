@@ -11,7 +11,6 @@ import "core:strings"
 import "core:time"
 import "obj"
 import sdl "vendor:sdl3"
-import image "vendor:stb/image"
 import vk "vendor:vulkan"
 
 MAX_TEXTURES :: 8
@@ -33,7 +32,22 @@ main :: proc() {
 	vulkan_init()
 	defer vulkan_cleanup()
 
-	pipeline_init()
+	cb, fence := loader_command_buffer_create()
+	model := read_gltf_model(
+		filepath.join({"assets", "ABeautifulGame.glb"}, context.temp_allocator),
+		cb,
+	)
+	defer model_destroy(model)
+
+
+	modelPipeline := model_pipeline_init()
+	defer model_pipeline_destroy(modelPipeline)
+
+
+	loader_command_buffer_destroy(cb, fence)
+	vk_buffer_pool_clear()
+
+
 	quit := false
 	prevScreenWidth := screenWidth
 	prevScreenHeight := screenHeight
@@ -100,7 +114,160 @@ main :: proc() {
 		Camera_process_keyboard_movement(&camera)
 
 		vulkan_update_swapchain()
-		vulkan_render(&camera)
+		vk_chk(vk.WaitForFences(vkDevice, 1, &fences[frameIndex], true, max(u64)))
+		vk_chk(vk.ResetFences(vkDevice, 1, &fences[frameIndex]))
+		vk_chk_swapchain(
+			vk.AcquireNextImageKHR(
+				vkDevice,
+				vkSwapchain,
+				max(u64),
+				presentSemaphores[frameIndex],
+				vk.Fence{},
+				&imageIndex,
+			),
+		)
+
+
+		cb := drawCommandBuffers[frameIndex]
+		vk_chk(vk.ResetCommandBuffer(cb, {}))
+
+		vk_chk(
+			vk.BeginCommandBuffer(
+				cb,
+				&{sType = .COMMAND_BUFFER_BEGIN_INFO, flags = {.ONE_TIME_SUBMIT}},
+			),
+		)
+		barriers := [?]vk.ImageMemoryBarrier2 {
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+				srcAccessMask = {},
+				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+				dstAccessMask = {.COLOR_ATTACHMENT_READ, .COLOR_ATTACHMENT_WRITE},
+				oldLayout = .UNDEFINED,
+				newLayout = .ATTACHMENT_OPTIMAL,
+				image = vkSwapchainImages[imageIndex],
+				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+			},
+			{
+				sType = .IMAGE_MEMORY_BARRIER_2,
+				srcStageMask = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
+				srcAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+				dstStageMask = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
+				dstAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+				oldLayout = .UNDEFINED,
+				newLayout = .ATTACHMENT_OPTIMAL,
+				image = vkDepthImage,
+				subresourceRange = {aspectMask = {.DEPTH}, levelCount = 1, layerCount = 1},
+			},
+		}
+		vk.CmdPipelineBarrier2(
+			cb,
+			&{
+				sType = .DEPENDENCY_INFO,
+				imageMemoryBarrierCount = len(barriers),
+				pImageMemoryBarriers = raw_data(barriers[:]),
+			},
+		)
+		vk.CmdBeginRendering(
+			cb,
+			&{
+				sType = .RENDERING_INFO,
+				renderArea = {extent = {width = screenWidth, height = screenHeight}},
+				layerCount = 1,
+				colorAttachmentCount = 1,
+				pColorAttachments = &vk.RenderingAttachmentInfo {
+					sType = .RENDERING_ATTACHMENT_INFO,
+					imageView = vkSwpachainImageViews[imageIndex],
+					imageLayout = .ATTACHMENT_OPTIMAL,
+					loadOp = .CLEAR,
+					storeOp = .STORE,
+					clearValue = {color = {float32 = {0.2, 0.4, 0.6, 1}}},
+				},
+				pDepthAttachment = &vk.RenderingAttachmentInfo {
+					sType = .RENDERING_ATTACHMENT_INFO,
+					imageView = vkDepthImageView,
+					imageLayout = .ATTACHMENT_OPTIMAL,
+					loadOp = .CLEAR,
+					storeOp = .DONT_CARE,
+					clearValue = {depthStencil = {1, 0}},
+				},
+			},
+		)
+
+		vk.CmdSetViewport(
+			cb,
+			0,
+			1,
+			&vk.Viewport {
+				width = f32(screenWidth),
+				height = f32(screenHeight),
+				minDepth = 0,
+				maxDepth = 1,
+			},
+		)
+		vk.CmdSetScissor(
+			cb,
+			0,
+			1,
+			&vk.Rect2D{extent = {width = screenWidth, height = screenHeight}},
+		)
+
+		model_draw(cb, &camera, model, modelPipeline)
+		vk.CmdEndRendering(cb)
+
+		vk.CmdPipelineBarrier2(
+			cb,
+			&{
+				sType = .DEPENDENCY_INFO,
+				imageMemoryBarrierCount = 1,
+				pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
+					sType = .IMAGE_MEMORY_BARRIER_2,
+					srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+					srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+					dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
+					dstAccessMask = {},
+					oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+					newLayout = .PRESENT_SRC_KHR,
+					image = vkSwapchainImages[imageIndex],
+					subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+				},
+			},
+		)
+		vk.EndCommandBuffer(cb)
+		waitStage: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
+		vk_chk(
+			vk.QueueSubmit(
+				vkQueue,
+				1,
+				&vk.SubmitInfo {
+					sType = .SUBMIT_INFO,
+					waitSemaphoreCount = 1,
+					pWaitSemaphores = &presentSemaphores[frameIndex],
+					pWaitDstStageMask = &waitStage,
+					commandBufferCount = 1,
+					pCommandBuffers = &cb,
+					signalSemaphoreCount = 1,
+					pSignalSemaphores = &renderSemaphores[imageIndex],
+				},
+				fences[frameIndex],
+			),
+		)
+		frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT
+		vk_chk_swapchain(
+			vk.QueuePresentKHR(
+				vkQueue,
+				&{
+					sType = .PRESENT_INFO_KHR,
+					waitSemaphoreCount = 1,
+					pWaitSemaphores = &renderSemaphores[imageIndex],
+					swapchainCount = 1,
+					pSwapchains = &vkSwapchain,
+					pImageIndices = &imageIndex,
+				},
+			),
+		)
+
 	}
 }
 vulkan_init :: proc() {
@@ -488,402 +655,7 @@ vulkan_init :: proc() {
 
 
 }
-pipeline_init :: proc() {
 
-
-	ensure(os.exists(filepath.join({os.get_current_directory(), "assets", "suzanne.obj"})))
-	objMesh, ok := obj.load_obj(filepath.join({"assets", "suzanne.obj"}, context.temp_allocator))
-	ensure(ok)
-
-
-	vk_chk(
-		vma.create_buffer(
-			vkAllocator,
-			{
-				sType = .BUFFER_CREATE_INFO,
-				size = vk.DeviceSize(
-					size_of(obj.Vertex) * len(objMesh.vertices) +
-					size_of(u32) * len(objMesh.indices),
-				),
-				usage = {.VERTEX_BUFFER, .INDEX_BUFFER},
-			},
-			{
-				flags = {.Host_Access_Sequential_Write, .Host_Access_Allow_Transfer_Instead},
-				usage = .Auto,
-			},
-			&vBuffer,
-			&vBufferAllocation,
-			nil,
-		),
-	)
-	bufferPtr: rawptr
-	vertexBufferSize = size_of(obj.Vertex) * len(objMesh.vertices)
-
-	vk_chk(vma.map_memory(vkAllocator, vBufferAllocation, &bufferPtr))
-	mem.copy(bufferPtr, raw_data(objMesh.vertices), size_of(obj.Vertex) * len(objMesh.vertices))
-
-
-	indicesCount = u32(len(objMesh.indices))
-	mem.copy(
-		rawptr(uintptr(bufferPtr) + uintptr(vertexBufferSize)),
-		raw_data(objMesh.indices),
-		size_of(u32) * len(objMesh.indices),
-	)
-	vma.unmap_memory(vkAllocator, vBufferAllocation)
-
-
-	for &texture, i in textures {
-		width, height, channels: i32
-		pixels := image.load(
-			strings.clone_to_cstring(
-				filepath.join({"assets", fmt.tprintf("suzanne%d.png", i)}),
-				context.temp_allocator,
-			),
-			&width,
-			&height,
-			&channels,
-			4,
-		)
-		imageFormat: vk.Format = .B8G8R8A8_SRGB
-
-		ensure(pixels != nil)
-		vk_chk(
-			vma.create_image(
-				vkAllocator,
-				{
-					sType = .IMAGE_CREATE_INFO,
-					imageType = .D2,
-					format = imageFormat,
-					extent = {width = u32(width), height = u32(height), depth = 1},
-					mipLevels = 1,
-					arrayLayers = 1,
-					samples = {._1},
-					tiling = .OPTIMAL,
-					usage = {.TRANSFER_DST, .SAMPLED},
-					initialLayout = .UNDEFINED,
-				},
-				{usage = .Auto},
-				&texture.image,
-				&texture.allocation,
-				nil,
-			),
-		)
-
-		imgSrcBuffer: vk.Buffer
-		imgSrcAllocation: vma.Allocation
-		vk_chk(
-			vma.create_buffer(
-				vkAllocator,
-				{
-					sType = .BUFFER_CREATE_INFO,
-					size = vk.DeviceSize(width * height * 4),
-					usage = {.TRANSFER_SRC},
-				},
-				{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
-				&imgSrcBuffer,
-				&imgSrcAllocation,
-				nil,
-			),
-		)
-		imgSrcBufferPtr: rawptr
-		vk_chk(vma.map_memory(vkAllocator, imgSrcAllocation, &imgSrcBufferPtr))
-		mem.copy(imgSrcBufferPtr, pixels, int(width) * int(height) * 4)
-
-		fenceOneTime: vk.Fence
-		vk_chk(vk.CreateFence(vkDevice, &{sType = .FENCE_CREATE_INFO}, nil, &fenceOneTime))
-
-
-		cbOneTime: vk.CommandBuffer
-		vk_chk(
-			vk.AllocateCommandBuffers(
-				vkDevice,
-				&vk.CommandBufferAllocateInfo {
-					sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-					commandPool = vkCommandPool,
-					commandBufferCount = 1,
-				},
-				&cbOneTime,
-			),
-		)
-		vk_chk(
-			vk.BeginCommandBuffer(
-				cbOneTime,
-				&vk.CommandBufferBeginInfo {
-					sType = .COMMAND_BUFFER_BEGIN_INFO,
-					flags = {.ONE_TIME_SUBMIT},
-				},
-			),
-		)
-
-		barrier := vk.ImageMemoryBarrier2 {
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {},
-			srcAccessMask = {},
-			dstStageMask = {.TRANSFER},
-			dstAccessMask = {.TRANSFER_WRITE},
-			oldLayout = .UNDEFINED,
-			newLayout = .TRANSFER_DST_OPTIMAL,
-			image = texture.image,
-			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
-		}
-		vk.CmdPipelineBarrier2(
-			cbOneTime,
-			&vk.DependencyInfo {
-				sType = .DEPENDENCY_INFO,
-				imageMemoryBarrierCount = 1,
-				pImageMemoryBarriers = &barrier,
-			},
-		)
-
-		copyRegion := vk.BufferImageCopy {
-			bufferOffset = 0,
-			imageSubresource = {aspectMask = {.COLOR}, mipLevel = 0, layerCount = 1},
-			imageExtent = {width = u32(width), height = u32(height), depth = 1},
-		}
-		vk.CmdCopyBufferToImage(
-			cbOneTime,
-			imgSrcBuffer,
-			texture.image,
-			.TRANSFER_DST_OPTIMAL,
-			1,
-			&copyRegion,
-		)
-
-		barrier = vk.ImageMemoryBarrier2 {
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {.TRANSFER},
-			srcAccessMask = {.TRANSFER_WRITE},
-			dstStageMask = {.FRAGMENT_SHADER},
-			dstAccessMask = {.SHADER_READ},
-			oldLayout = .TRANSFER_DST_OPTIMAL,
-			newLayout = .READ_ONLY_OPTIMAL,
-			image = texture.image,
-			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
-		}
-		vk.CmdPipelineBarrier2(
-			cbOneTime,
-			&vk.DependencyInfo {
-				sType = .DEPENDENCY_INFO,
-				imageMemoryBarrierCount = 1,
-				pImageMemoryBarriers = &barrier,
-			},
-		)
-
-		vk_chk(vk.EndCommandBuffer(cbOneTime))
-		vk_chk(
-			vk.QueueSubmit(
-				vkQueue,
-				1,
-				&vk.SubmitInfo {
-					sType = .SUBMIT_INFO,
-					commandBufferCount = 1,
-					pCommandBuffers = &cbOneTime,
-				},
-				fenceOneTime,
-			),
-		)
-		vk_chk(vk.WaitForFences(vkDevice, 1, &fenceOneTime, true, max(u64)))
-
-		vk.FreeCommandBuffers(vkDevice, vkCommandPool, 1, &cbOneTime)
-		vma.unmap_memory(vkAllocator, imgSrcAllocation)
-		vma.destroy_buffer(vkAllocator, imgSrcBuffer, imgSrcAllocation)
-
-
-		vk.DestroyFence(vkDevice, fenceOneTime, nil)
-
-		vk_chk(
-			vk.CreateImageView(
-				vkDevice,
-				&vk.ImageViewCreateInfo {
-					sType = .IMAGE_VIEW_CREATE_INFO,
-					image = texture.image,
-					viewType = .D2,
-					format = imageFormat,
-					subresourceRange = {
-						aspectMask = {.COLOR},
-						baseMipLevel = 0,
-						levelCount = 1,
-						baseArrayLayer = 0,
-						layerCount = 1,
-					},
-				},
-				nil,
-				&texture.view,
-			),
-		)
-
-		vk_chk(
-			vk.CreateSampler(
-				vkDevice,
-				&vk.SamplerCreateInfo {
-					sType = .SAMPLER_CREATE_INFO,
-					magFilter = .LINEAR,
-					minFilter = .LINEAR,
-					mipmapMode = .LINEAR,
-					anisotropyEnable = true,
-					maxAnisotropy = 8.0,
-					maxLod = 1.0,
-				},
-				nil,
-				&texture.sampler,
-			),
-		)
-
-		textureDescriptors[i] = {
-			sampler     = texture.sampler,
-			imageView   = texture.view,
-			imageLayout = .READ_ONLY_OPTIMAL,
-		}
-
-	}
-
-	descLayoutBindings := [?]vk.DescriptorSetLayoutBinding {
-		{
-			binding = 0,
-			descriptorType = .COMBINED_IMAGE_SAMPLER,
-			descriptorCount = MAX_TEXTURES,
-			stageFlags = {.FRAGMENT},
-		},
-	}
-
-	vk_chk(
-		vk.CreateDescriptorSetLayout(
-			vkDevice,
-			&vk.DescriptorSetLayoutCreateInfo {
-				sType = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-				flags = {.PUSH_DESCRIPTOR_KHR},
-				bindingCount = len(descLayoutBindings),
-				pBindings = raw_data(descLayoutBindings[:]),
-			},
-			nil,
-			&descriptorSetLayoutTex,
-		),
-	)
-
-	VERT_CODE :: #load("../build/shaders/vert.spv")
-	FRAG_CODE :: #load("../build/shaders/frag.spv")
-
-	vertModule := create_shader_module(vkDevice, VERT_CODE)
-	fragModule := create_shader_module(vkDevice, FRAG_CODE)
-
-	vk_chk(
-		vk.CreatePipelineLayout(
-			vkDevice,
-			&{
-				sType = .PIPELINE_LAYOUT_CREATE_INFO,
-				setLayoutCount = 1,
-				pSetLayouts = &descriptorSetLayoutTex,
-				pushConstantRangeCount = 1,
-				pPushConstantRanges = &vk.PushConstantRange {
-					stageFlags = {.VERTEX},
-					size = size_of(vk.DeviceAddress),
-				},
-			},
-			nil,
-			&pipelineLayout,
-		),
-	)
-	vaDescriptors := [?]vk.VertexInputAttributeDescription {
-		{location = 0, binding = 0, format = .R32G32B32_SFLOAT},
-		{
-			location = 1,
-			binding = 0,
-			format = .R32G32B32_SFLOAT,
-			offset = u32(offset_of(obj.Vertex, norm)),
-		},
-		{
-			location = 2,
-			binding = 0,
-			format = .R32G32_SFLOAT,
-			offset = u32(offset_of(obj.Vertex, uv)),
-		},
-	}
-
-	dynamicStates := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
-	pipelineStages := [?]vk.PipelineShaderStageCreateInfo {
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.VERTEX},
-			module = vertModule,
-			pName = "main",
-		},
-		{
-			sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
-			stage = {.FRAGMENT},
-			module = fragModule,
-			pName = "main",
-		},
-	}
-	vk_chk(
-		vk.CreateGraphicsPipelines(
-			vkDevice,
-			{},
-			1,
-			&vk.GraphicsPipelineCreateInfo {
-				sType = .GRAPHICS_PIPELINE_CREATE_INFO,
-				pNext = &vk.PipelineRenderingCreateInfo {
-					sType = .PIPELINE_RENDERING_CREATE_INFO,
-					colorAttachmentCount = 1,
-					pColorAttachmentFormats = &swapchainImageFormat,
-					depthAttachmentFormat = depthFormat,
-				},
-				stageCount = len(pipelineStages),
-				pStages = raw_data(pipelineStages[:]),
-				pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
-					sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-					vertexBindingDescriptionCount = 1,
-					pVertexBindingDescriptions = &vk.VertexInputBindingDescription {
-						binding = 0,
-						stride = size_of(obj.Vertex),
-						inputRate = .VERTEX,
-					},
-					vertexAttributeDescriptionCount = len(vaDescriptors),
-					pVertexAttributeDescriptions = raw_data(vaDescriptors[:]),
-				},
-				pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo {
-					sType = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-					topology = .TRIANGLE_LIST,
-				},
-				pViewportState = &vk.PipelineViewportStateCreateInfo {
-					sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-					viewportCount = 1,
-					scissorCount = 1,
-				},
-				pRasterizationState = &vk.PipelineRasterizationStateCreateInfo {
-					sType = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-					lineWidth = 1.0,
-				},
-				pMultisampleState = &vk.PipelineMultisampleStateCreateInfo {
-					sType = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-					rasterizationSamples = {._1},
-				},
-				pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo {
-					sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-					depthTestEnable = true,
-					depthWriteEnable = true,
-					depthCompareOp = .LESS_OR_EQUAL,
-				},
-				pColorBlendState = &vk.PipelineColorBlendStateCreateInfo {
-					sType = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-					attachmentCount = 1,
-					pAttachments = &vk.PipelineColorBlendAttachmentState {
-						colorWriteMask = {.R, .G, .B, .A},
-					},
-				},
-				pDynamicState = &vk.PipelineDynamicStateCreateInfo {
-					sType = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-					dynamicStateCount = len(dynamicStates),
-					pDynamicStates = raw_data(dynamicStates[:]),
-				},
-				layout = pipelineLayout,
-			},
-			nil,
-			&graphicsPipeline,
-		),
-	)
-	vk.DestroyShaderModule(vkDevice, vertModule, nil)
-	vk.DestroyShaderModule(vkDevice, fragModule, nil)
-}
 sdl_ensure :: proc(cond: bool, message: string = "") {
 	msg := fmt.tprintf("%s:%s\n", message, sdl.GetError())
 	ensure(cond, msg)
@@ -897,221 +669,7 @@ vk_chk :: proc(r: vk.Result) {
 		}
 	}
 }
-vulkan_render :: proc(c: ^Camera) {
-	vk_chk(vk.WaitForFences(vkDevice, 1, &fences[frameIndex], true, max(u64)))
-	vk_chk(vk.ResetFences(vkDevice, 1, &fences[frameIndex]))
-	vk_chk_swapchain(
-		vk.AcquireNextImageKHR(
-			vkDevice,
-			vkSwapchain,
-			max(u64),
-			presentSemaphores[frameIndex],
-			vk.Fence{},
-			&imageIndex,
-		),
-	)
-	view, proj := Camera_view_proj(c)
-	shaderData: ShaderData = {
-		projection = proj,
-		view       = view,
-	}
-	shaderData.projection[1][1] *= -1
-	for &model, i in shaderData.model {
-		model =
-			la.matrix4_translate_f32([3]f32{f32(i * 3), 0, 0}) *
-			la.identity_matrix(matrix[4, 4]f32)
-	}
 
-	mem.copy(shaderDataBuffers[frameIndex].mapped, &shaderData, size_of(shaderData))
-
-
-	cb := drawCommandBuffers[frameIndex]
-	vk_chk(vk.ResetCommandBuffer(cb, {}))
-
-	vk_chk(
-		vk.BeginCommandBuffer(
-			cb,
-			&{sType = .COMMAND_BUFFER_BEGIN_INFO, flags = {.ONE_TIME_SUBMIT}},
-		),
-	)
-	barriers := [?]vk.ImageMemoryBarrier2 {
-		{
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-			srcAccessMask = {},
-			dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-			dstAccessMask = {.COLOR_ATTACHMENT_READ, .COLOR_ATTACHMENT_WRITE},
-			oldLayout = .UNDEFINED,
-			newLayout = .ATTACHMENT_OPTIMAL,
-			image = vkSwapchainImages[imageIndex],
-			subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
-		},
-		{
-			sType = .IMAGE_MEMORY_BARRIER_2,
-			srcStageMask = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
-			srcAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-			dstStageMask = {.EARLY_FRAGMENT_TESTS, .LATE_FRAGMENT_TESTS},
-			dstAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-			oldLayout = .UNDEFINED,
-			newLayout = .ATTACHMENT_OPTIMAL,
-			image = vkDepthImage,
-			subresourceRange = {aspectMask = {.DEPTH}, levelCount = 1, layerCount = 1},
-		},
-	}
-	vk.CmdPipelineBarrier2(
-		cb,
-		&{
-			sType = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = len(barriers),
-			pImageMemoryBarriers = raw_data(barriers[:]),
-		},
-	)
-	vk.CmdBeginRendering(
-		cb,
-		&{
-			sType = .RENDERING_INFO,
-			renderArea = {extent = {width = screenWidth, height = screenHeight}},
-			layerCount = 1,
-			colorAttachmentCount = 1,
-			pColorAttachments = &vk.RenderingAttachmentInfo {
-				sType = .RENDERING_ATTACHMENT_INFO,
-				imageView = vkSwpachainImageViews[imageIndex],
-				imageLayout = .ATTACHMENT_OPTIMAL,
-				loadOp = .CLEAR,
-				storeOp = .STORE,
-				clearValue = {color = {float32 = {0.2, 0.4, 0.6, 1}}},
-			},
-			pDepthAttachment = &vk.RenderingAttachmentInfo {
-				sType = .RENDERING_ATTACHMENT_INFO,
-				imageView = vkDepthImageView,
-				imageLayout = .ATTACHMENT_OPTIMAL,
-				loadOp = .CLEAR,
-				storeOp = .DONT_CARE,
-				clearValue = {depthStencil = {1, 0}},
-			},
-		},
-	)
-
-	vk.CmdSetViewport(
-		cb,
-		0,
-		1,
-		&vk.Viewport {
-			width = f32(screenWidth),
-			height = f32(screenHeight),
-			minDepth = 0,
-			maxDepth = 1,
-		},
-	)
-	vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D{extent = {width = screenWidth, height = screenHeight}})
-
-	vk.CmdBindPipeline(cb, .GRAPHICS, graphicsPipeline)
-	assert(len(textures) < MAX_TEXTURES)
-	allDescriptors: [MAX_TEXTURES]vk.DescriptorImageInfo
-	for i in 0 ..< MAX_TEXTURES {
-		allDescriptors[i] = textureDescriptors[i % len(textures)]
-	}
-
-	setsToWrite := [?]vk.WriteDescriptorSet {
-		{
-			sType = .WRITE_DESCRIPTOR_SET,
-			dstBinding = 0,
-			dstArrayElement = 0,
-			descriptorCount = MAX_TEXTURES,
-			descriptorType = .COMBINED_IMAGE_SAMPLER,
-			pImageInfo = raw_data(allDescriptors[:]),
-		},
-	}
-	vk.CmdPushDescriptorSetKHR(
-		cb,
-		.GRAPHICS,
-		pipelineLayout,
-		0,
-		len(setsToWrite),
-		raw_data(setsToWrite[:]),
-	)
-
-
-	vk.CmdPushConstants(
-		cb,
-		pipelineLayout,
-		{.VERTEX},
-		0,
-		size_of(vk.DeviceAddress),
-		&shaderDataBuffers[frameIndex].deviceAddress,
-	)
-	vOffset := vk.DeviceSize(0)
-	vk.CmdBindVertexBuffers(cb, 0, 1, &vBuffer, &vOffset)
-
-	assert(vertexBufferSize != 0)
-	vk.CmdBindIndexBuffer(cb, vBuffer, vk.DeviceSize(vertexBufferSize), .UINT32)
-
-	// vk.CmdPushConstants(
-	// 	cb,
-	// 	pipelineLayout,
-	// 	{.VERTEX},
-	// 	0,
-	// 	size_of(vk.DeviceAddress),
-	// 	&shaderDataBuffers[frameIndex].deviceAddress,
-	// )
-	assert(indicesCount != 0)
-	vk.CmdDrawIndexed(cb, indicesCount, 3, 0, 0, 0)
-	vk.CmdEndRendering(cb)
-
-	vk.CmdPipelineBarrier2(
-		cb,
-		&{
-			sType = .DEPENDENCY_INFO,
-			imageMemoryBarrierCount = 1,
-			pImageMemoryBarriers = &vk.ImageMemoryBarrier2 {
-				sType = .IMAGE_MEMORY_BARRIER_2,
-				srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-				srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
-				dstStageMask = {.COLOR_ATTACHMENT_OUTPUT},
-				dstAccessMask = {},
-				oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
-				newLayout = .PRESENT_SRC_KHR,
-				image = vkSwapchainImages[imageIndex],
-				subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
-			},
-		},
-	)
-	vk.EndCommandBuffer(cb)
-	waitStage: vk.PipelineStageFlags = {.COLOR_ATTACHMENT_OUTPUT}
-	vk_chk(
-		vk.QueueSubmit(
-			vkQueue,
-			1,
-			&vk.SubmitInfo {
-				sType = .SUBMIT_INFO,
-				waitSemaphoreCount = 1,
-				pWaitSemaphores = &presentSemaphores[frameIndex],
-				pWaitDstStageMask = &waitStage,
-				commandBufferCount = 1,
-				pCommandBuffers = &cb,
-				signalSemaphoreCount = 1,
-				pSignalSemaphores = &renderSemaphores[imageIndex],
-			},
-			fences[frameIndex],
-		),
-	)
-	frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT
-	vk_chk_swapchain(
-		vk.QueuePresentKHR(
-			vkQueue,
-			&{
-				sType = .PRESENT_INFO_KHR,
-				waitSemaphoreCount = 1,
-				pWaitSemaphores = &renderSemaphores[imageIndex],
-				swapchainCount = 1,
-				pSwapchains = &vkSwapchain,
-				pImageIndices = &imageIndex,
-			},
-		),
-	)
-
-
-}
 vulkan_update_swapchain :: proc() {
 	if updateSwapchain == false do return
 	vk_chk(vk.DeviceWaitIdle(vkDevice))
@@ -1250,24 +808,15 @@ vulkan_cleanup :: proc() {
 		if view != {} do vk.DestroyImageView(vkDevice, view, nil)
 	}
 
-	if vBuffer != {} do vma.destroy_buffer(vkAllocator, vBuffer, vBufferAllocation)
 
+	// for t in textures {
+	// 	if t.view != {} do vk.DestroyImageView(vkDevice, t.view, nil)
 
-	for t in textures {
-		if t.view != {} do vk.DestroyImageView(vkDevice, t.view, nil)
+	// 	if t.sampler != {} do vk.DestroySampler(vkDevice, t.sampler, nil)
 
-		if t.sampler != {} do vk.DestroySampler(vkDevice, t.sampler, nil)
+	// 	if t.image != {} do vma.destroy_image(vkAllocator, t.image, t.allocation)
 
-		if t.image != {} do vma.destroy_image(vkAllocator, t.image, t.allocation)
-
-	}
-
-	if descriptorSetLayoutTex != {} do vk.DestroyDescriptorSetLayout(vkDevice, descriptorSetLayoutTex, nil)
-
-
-	if pipelineLayout != {} do vk.DestroyPipelineLayout(vkDevice, pipelineLayout, nil)
-
-	if graphicsPipeline != {} do vk.DestroyPipeline(vkDevice, graphicsPipeline, nil)
+	// }
 
 
 	if vkSwapchain != {} do vk.DestroySwapchainKHR(vkDevice, vkSwapchain, nil)

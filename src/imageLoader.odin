@@ -1,0 +1,161 @@
+package main
+import "../modules/vma"
+import "core:container/small_array"
+import "core:mem"
+import stbImage "vendor:stb/image"
+import vk "vendor:vulkan"
+GPUTexture :: struct {
+	image:      vk.Image,
+	descriptor: vk.DescriptorImageInfo,
+	allocation: vma.Allocation,
+}
+
+load_gltf_image :: proc(pi: GltfPrimitiveImage, cb: vk.CommandBuffer) -> (texture: GPUTexture) {
+	primitive_image_assert(pi)
+	//i assume 4 channels to set the format properly
+	assert(pi.channels == 4)
+	imageFormat: vk.Format = .R8G8B8A8_SRGB
+
+	vk_chk(
+		vma.create_image(
+			vkAllocator,
+			{
+				sType = .IMAGE_CREATE_INFO,
+				imageType = .D2,
+				format = imageFormat,
+				extent = {width = u32(pi.width), height = u32(pi.height), depth = 1},
+				mipLevels = 1,
+				arrayLayers = 1,
+				samples = {._1},
+				tiling = .OPTIMAL,
+				usage = {.TRANSFER_DST, .SAMPLED},
+				initialLayout = .UNDEFINED,
+			},
+			{usage = .Auto},
+			&texture.image,
+			&texture.allocation,
+			nil,
+		),
+	)
+
+	poolIndex := small_array.len(vkBufferPool)
+	small_array.append(&vkBufferPool, VkBufferPoolElem{})
+
+	poolElem := small_array.get_ptr(&vkBufferPool, poolIndex)
+	imgSrcBuffer := &poolElem.buffer
+	imgSrcAllocation := &poolElem.alloc
+
+	vk_chk(
+		vma.create_buffer(
+			vkAllocator,
+			{
+				sType = .BUFFER_CREATE_INFO,
+				size = vk.DeviceSize(pi.width * pi.height * pi.channels),
+				usage = {.TRANSFER_SRC},
+			},
+			{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
+			imgSrcBuffer,
+			imgSrcAllocation,
+			nil,
+		),
+	)
+	imgSrcBufferPtr: rawptr
+	vk_chk(vma.map_memory(vkAllocator, imgSrcAllocation^, &imgSrcBufferPtr))
+	mem.copy(imgSrcBufferPtr, pi.data, int(pi.width) * int(pi.height) * int(pi.channels))
+
+
+	barrier := vk.ImageMemoryBarrier2 {
+		sType = .IMAGE_MEMORY_BARRIER_2,
+		srcStageMask = {},
+		srcAccessMask = {},
+		dstStageMask = {.TRANSFER},
+		dstAccessMask = {.TRANSFER_WRITE},
+		oldLayout = .UNDEFINED,
+		newLayout = .TRANSFER_DST_OPTIMAL,
+		image = texture.image,
+		subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+	}
+	vk.CmdPipelineBarrier2(
+		cb,
+		&vk.DependencyInfo {
+			sType = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers = &barrier,
+		},
+	)
+
+	copyRegion := vk.BufferImageCopy {
+		bufferOffset = 0,
+		imageSubresource = {aspectMask = {.COLOR}, mipLevel = 0, layerCount = 1},
+		imageExtent = {width = u32(pi.width), height = u32(pi.height), depth = 1},
+	}
+	vk.CmdCopyBufferToImage(
+		cb,
+		imgSrcBuffer^,
+		texture.image,
+		.TRANSFER_DST_OPTIMAL,
+		1,
+		&copyRegion,
+	)
+
+	barrier = vk.ImageMemoryBarrier2 {
+		sType = .IMAGE_MEMORY_BARRIER_2,
+		srcStageMask = {.TRANSFER},
+		srcAccessMask = {.TRANSFER_WRITE},
+		dstStageMask = {.FRAGMENT_SHADER},
+		dstAccessMask = {.SHADER_READ},
+		oldLayout = .TRANSFER_DST_OPTIMAL,
+		newLayout = .READ_ONLY_OPTIMAL,
+		image = texture.image,
+		subresourceRange = {aspectMask = {.COLOR}, levelCount = 1, layerCount = 1},
+	}
+	vk.CmdPipelineBarrier2(
+		cb,
+		&vk.DependencyInfo {
+			sType = .DEPENDENCY_INFO,
+			imageMemoryBarrierCount = 1,
+			pImageMemoryBarriers = &barrier,
+		},
+	)
+
+
+	vk_chk(
+		vk.CreateImageView(
+			vkDevice,
+			&vk.ImageViewCreateInfo {
+				sType = .IMAGE_VIEW_CREATE_INFO,
+				image = texture.image,
+				viewType = .D2,
+				format = imageFormat,
+				subresourceRange = {
+					aspectMask = {.COLOR},
+					baseMipLevel = 0,
+					levelCount = 1,
+					baseArrayLayer = 0,
+					layerCount = 1,
+				},
+			},
+			nil,
+			&texture.descriptor.imageView,
+		),
+	)
+
+	vk_chk(
+		vk.CreateSampler(
+			vkDevice,
+			&vk.SamplerCreateInfo {
+				sType = .SAMPLER_CREATE_INFO,
+				magFilter = .LINEAR,
+				minFilter = .LINEAR,
+				mipmapMode = .LINEAR,
+				anisotropyEnable = true,
+				maxAnisotropy = 8.0,
+				maxLod = 1.0,
+			},
+			nil,
+			&texture.descriptor.sampler,
+		),
+	)
+	texture.descriptor.imageLayout = .READ_ONLY_OPTIMAL
+	return texture
+}

@@ -63,20 +63,17 @@ model_pipeline_init :: proc() -> (modelPipeline: ModelPipeline) {
 			&modelPipeline.layout,
 		),
 	)
+
+	viBindings := [?]vk.VertexInputBindingDescription {
+		{binding = 0, stride = size_of([3]f32), inputRate = .VERTEX},
+		{binding = 1, stride = size_of([3]f32), inputRate = .VERTEX},
+		{binding = 2, stride = size_of([2]f32), inputRate = .VERTEX},
+	}
+
 	vaDescriptors := [?]vk.VertexInputAttributeDescription {
-		{location = 0, binding = 0, format = .R32G32B32_SFLOAT},
-		{
-			location = 1,
-			binding = 0,
-			format = .R32G32B32_SFLOAT,
-			offset = u32(offset_of(obj.Vertex, norm)),
-		},
-		{
-			location = 2,
-			binding = 0,
-			format = .R32G32_SFLOAT,
-			offset = u32(offset_of(obj.Vertex, uv)),
-		},
+		{location = 0, binding = 0, format = .R32G32B32_SFLOAT, offset = 0},
+		{location = 1, binding = 1, format = .R32G32B32_SFLOAT, offset = 0},
+		{location = 2, binding = 2, format = .R32G32_SFLOAT, offset = 0},
 	}
 
 	dynamicStates := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
@@ -111,12 +108,8 @@ model_pipeline_init :: proc() -> (modelPipeline: ModelPipeline) {
 				pStages = raw_data(pipelineStages[:]),
 				pVertexInputState = &vk.PipelineVertexInputStateCreateInfo {
 					sType = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-					vertexBindingDescriptionCount = 1,
-					pVertexBindingDescriptions = &vk.VertexInputBindingDescription {
-						binding = 0,
-						stride = size_of(obj.Vertex),
-						inputRate = .VERTEX,
-					},
+					vertexBindingDescriptionCount = len(viBindings),
+					pVertexBindingDescriptions = raw_data(viBindings[:]),
 					vertexAttributeDescriptionCount = len(vaDescriptors),
 					pVertexAttributeDescriptions = raw_data(vaDescriptors[:]),
 				},
@@ -240,8 +233,13 @@ model_draw :: proc(cb: vk.CommandBuffer, c: ^Camera, model: Model, pipeline: Mod
 			raw_data(setsToWrite[:]),
 		)
 
-		vertexBufferOffset := vk.DeviceSize(0)
-		vk.CmdBindVertexBuffers(cb, 0, 1, &obj.primitive.vertexBuffer, &vertexBufferOffset)
+		buffers := [3]vk.Buffer {
+			obj.primitive.posBuffer,
+			obj.primitive.normBuffer,
+			obj.primitive.uvBuffer,
+		}
+		offsets := [3]vk.DeviceSize{0, 0, 0}
+		vk.CmdBindVertexBuffers(cb, 0, 3, raw_data(buffers[:]), raw_data(offsets[:]))
 		vk.CmdBindIndexBuffer(cb, obj.primitive.indexBuffer, 0, .UINT32)
 
 		assert(obj.primitive.indexCount != 0)

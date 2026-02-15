@@ -1,13 +1,16 @@
 package main
 
 import "../modules/vma"
+import "base:runtime"
 import "core:fmt"
 import "core:log"
 import la "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
+import "core:prof/spall"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import "obj"
 import sdl "vendor:sdl3"
@@ -15,8 +18,68 @@ import vk "vendor:vulkan"
 
 MAX_TEXTURES :: 8
 
+ENABLE_SPALL :: false && ODIN_DEBUG
+when ODIN_DEBUG && ENABLE_SPALL {
+	spall_ctx: spall.Context
+	@(thread_local)
+	spall_buffer: spall.Buffer
+
+
+	@(instrumentation_enter)
+	spall_enter :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
+
+	@(instrumentation_exit)
+	spall_exit :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_end(&spall_ctx, &spall_buffer)
+	}
+
+}
 
 main :: proc() {
+
+
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			if len(track.bad_free_array) > 0 {
+				fmt.eprintf("=== %v incorrect frees: ===\n", len(track.bad_free_array))
+				for entry in track.bad_free_array {
+					fmt.eprintf("- %p @ %v\n", entry.memory, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+
+		when ENABLE_SPALL {
+			spall_ctx = spall.context_create("spall-trace.spall")
+			defer spall.context_destroy(&spall_ctx)
+
+			buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+			defer delete(buffer_backing)
+
+			spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+			defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+		}
+
+	}
+
 
 	sdl_ensure(sdl.Init({.VIDEO, .EVENTS}))
 	window = sdl.CreateWindow(
@@ -250,7 +313,7 @@ main :: proc() {
 					commandBufferCount = 1,
 					pCommandBuffers = &cb,
 					signalSemaphoreCount = 1,
-					pSignalSemaphores = &renderSemaphores[imageIndex],
+					pSignalSemaphores = &vkRenderSemaphores[imageIndex],
 				},
 				fences[frameIndex],
 			),
@@ -262,7 +325,7 @@ main :: proc() {
 				&{
 					sType = .PRESENT_INFO_KHR,
 					waitSemaphoreCount = 1,
-					pWaitSemaphores = &renderSemaphores[imageIndex],
+					pWaitSemaphores = &vkRenderSemaphores[imageIndex],
 					swapchainCount = 1,
 					pSwapchains = &vkSwapchain,
 					pImageIndices = &imageIndex,
@@ -296,6 +359,7 @@ vulkan_init :: proc() {
 		layers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 		instanceCI.enabledLayerCount = u32(len(layers))
 		instanceCI.ppEnabledLayerNames = raw_data(layers[:])
+
 	}
 
 	vk_chk(vk.CreateInstance(&instanceCI, nil, &vkInstance))
@@ -352,7 +416,7 @@ vulkan_init :: proc() {
 	// fmt.printfln("Selected device: %s", deviceProperties.properties.deviceName)
 	queueFamilyCount: u32 = 0
 	vk.GetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, nil)
-	queueFamilies := make([]vk.QueueFamilyProperties, queueFamilyCount)
+	queueFamilies := make([]vk.QueueFamilyProperties, queueFamilyCount, context.temp_allocator)
 
 	vk.GetPhysicalDeviceQueueFamilyProperties(
 		vkPhysicalDevice,
@@ -438,7 +502,7 @@ vulkan_init :: proc() {
 
 	formatCount: u32 = 0
 	vk_chk(vk.GetPhysicalDeviceSurfaceFormatsKHR(vkPhysicalDevice, vkSurface, &formatCount, nil))
-	surfaceFormats := make([]vk.SurfaceFormatKHR, formatCount)
+	surfaceFormats := make([]vk.SurfaceFormatKHR, formatCount, context.temp_allocator)
 	vk_chk(
 		vk.GetPhysicalDeviceSurfaceFormatsKHR(
 			vkPhysicalDevice,
@@ -492,8 +556,8 @@ vulkan_init :: proc() {
 		),
 	)
 	vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, nil)
-	vkSwapchainImages = make([]vk.Image, vkImageCount)
-	vkSwpachainImageViews = make([]vk.ImageView, vkImageCount)
+	vkSwapchainImages = make([dynamic]vk.Image, vkImageCount)
+	vkSwpachainImageViews = make([dynamic]vk.ImageView, vkImageCount)
 	vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, raw_data(vkSwapchainImages))
 
 	for i in 0 ..< vkImageCount {
@@ -626,8 +690,8 @@ vulkan_init :: proc() {
 		vk_chk(vk.CreateSemaphore(vkDevice, &semaphoreCI, nil, &presentSemaphores[i]))
 
 	}
-	renderSemaphores = make([]vk.Semaphore, len(vkSwapchainImages))
-	for &s in renderSemaphores {
+	vkRenderSemaphores = make([]vk.Semaphore, len(vkSwapchainImages))
+	for &s in vkRenderSemaphores {
 		vk_chk(vk.CreateSemaphore(vkDevice, &semaphoreCI, nil, &s))
 	}
 	vk_chk(
@@ -703,8 +767,9 @@ vulkan_update_swapchain :: proc() {
 	}
 
 	vk_chk(vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, nil))
-	vkSwapchainImages = make([]vk.Image, vkImageCount)
-	vkSwpachainImageViews = make([]vk.ImageView, vkImageCount)
+	vkSwapchainImages = make([dynamic]vk.Image, vkImageCount)
+	delete(vkSwpachainImageViews)
+	clear_dynamic_array(&vkSwpachainImageViews)
 	vk_chk(
 		vk.GetSwapchainImagesKHR(
 			vkDevice,
@@ -796,10 +861,10 @@ vulkan_cleanup :: proc() {
 
 	}
 
-	for s in renderSemaphores {
+	for s in vkRenderSemaphores {
 		if s != {} do vk.DestroySemaphore(vkDevice, s, nil)
 	}
-
+	delete(vkRenderSemaphores)
 	if vkDepthImageView != {} do vk.DestroyImageView(vkDevice, vkDepthImageView, nil)
 
 	if vkDepthImage != {} do vma.destroy_image(vkAllocator, vkDepthImage, vmaDepthStencilAlloc)
@@ -808,7 +873,7 @@ vulkan_cleanup :: proc() {
 	for view in vkSwpachainImageViews {
 		if view != {} do vk.DestroyImageView(vkDevice, view, nil)
 	}
-
+	delete(vkSwpachainImageViews)
 
 	// for t in textures {
 	// 	if t.view != {} do vk.DestroyImageView(vkDevice, t.view, nil)
@@ -821,6 +886,7 @@ vulkan_cleanup :: proc() {
 
 
 	if vkSwapchain != {} do vk.DestroySwapchainKHR(vkDevice, vkSwapchain, nil)
+	delete(vkSwapchainImages)
 
 	if vkCommandPool != {} do vk.DestroyCommandPool(vkDevice, vkCommandPool, nil)
 

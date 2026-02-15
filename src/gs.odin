@@ -27,8 +27,8 @@ vkAllocator: vma.Allocator
 vkSurface: vk.SurfaceKHR
 vkSwapchain: vk.SwapchainKHR
 vkImageCount: u32
-vkSwapchainImages: []vk.Image = nil
-vkSwpachainImageViews: []vk.ImageView = nil
+vkSwapchainImages: [dynamic]vk.Image = nil
+vkSwpachainImageViews: [dynamic]vk.ImageView = nil
 vkDepthImage: vk.Image
 vmaDepthStencilAlloc: vma.Allocation
 vkDepthImageView: vk.ImageView
@@ -52,7 +52,7 @@ shaderDataBuffers := [MAX_FRAMES_IN_FLIGHT]ShaderDataBuffer{}
 drawCommandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
 fences := [MAX_FRAMES_IN_FLIGHT]vk.Fence{}
 presentSemaphores := [MAX_FRAMES_IN_FLIGHT]vk.Semaphore{}
-renderSemaphores: []vk.Semaphore = nil
+vkRenderSemaphores: []vk.Semaphore = nil
 vkCommandPool: vk.CommandPool
 vkCommandBuffers := [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer{}
 

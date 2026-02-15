@@ -1,0 +1,23 @@
+// raddbg 0.9.24 project file
+
+target:
+{
+  executable: "build/debug.exe"
+  working_directory: "build/"
+  enabled: 1
+}
+debug_info:
+{
+  path: "D:/dev/odin/try-vulkan/build/debug.pdb"
+  timestamp: 66206669765234
+}
+debug_info:
+{
+  path: "D:/utils/msys2/ucrt64/bin/SDL3.dll"
+  timestamp: 66197312753000
+}
+debug_info:
+{
+  path: "D:/utils/vulkansdk/Bin/VkLayer_khronos_validation.pdb"
+  timestamp: 66200616706612
+}

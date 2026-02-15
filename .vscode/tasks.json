@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "run-dev",
+            "type": "shell",
+            "command": "odin build src -o:speed -out:build/debug.exe -debug; if ($LASTEXITCODE -eq 0) { raddbg --ipc run }",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": true,
+                "clear": false,
+                "showReuseMessage": false
+            },
+            "problemMatcher": [],
+            "runOptions": {
+                "runOn": "default"
+            }
+        }
+    ]
+}

@@ -2,15 +2,14 @@ package main
 import "core:fmt"
 import la "core:math/linalg"
 import "core:mem"
-import "obj"
 import vk "vendor:vulkan"
-ModelPipeline :: struct {
+PipelineData :: struct {
 	descriptorSetLayout: vk.DescriptorSetLayout,
 	layout:              vk.PipelineLayout,
 	graphicsPipeline:    vk.Pipeline,
 }
 
-model_pipeline_init :: proc() -> (modelPipeline: ModelPipeline) {
+model_pipeline_init :: proc() -> (modelPipeline: PipelineData) {
 	descLayoutBindings := [?]vk.DescriptorSetLayoutBinding {
 		{
 			binding = 0,
@@ -40,8 +39,8 @@ model_pipeline_init :: proc() -> (modelPipeline: ModelPipeline) {
 		),
 	)
 
-	VERT_SPV :: #load("../build/shaders/vert.spv")
-	FRAG_SPV :: #load("../build/shaders/frag.spv")
+	VERT_SPV :: #load("../build/shader-binaries/model.vertex.spv")
+	FRAG_SPV :: #load("../build/shader-binaries/model.fragment.spv")
 
 	vertModule := create_shader_module(vkDevice, VERT_SPV)
 	fragModule := create_shader_module(vkDevice, FRAG_SPV)
@@ -158,14 +157,14 @@ model_pipeline_init :: proc() -> (modelPipeline: ModelPipeline) {
 	vk.DestroyShaderModule(vkDevice, fragModule, nil)
 	return modelPipeline
 }
-model_pipeline_destroy :: proc(p: ModelPipeline) {
+model_pipeline_destroy :: proc(p: PipelineData) {
 	if p.descriptorSetLayout != {} do vk.DestroyDescriptorSetLayout(vkDevice, p.descriptorSetLayout, nil)
 	if p.layout != {} do vk.DestroyPipelineLayout(vkDevice, p.layout, nil)
 	if p.graphicsPipeline != {} do vk.DestroyPipeline(vkDevice, p.graphicsPipeline, nil)
 
 }
 
-model_draw :: proc(cb: vk.CommandBuffer, c: ^Camera, model: Model, pipeline: ModelPipeline) {
+model_draw :: proc(cb: vk.CommandBuffer, c: ^Camera, model: Model, pipeline: PipelineData) {
 
 	vk.CmdBindPipeline(cb, .GRAPHICS, pipeline.graphicsPipeline)
 

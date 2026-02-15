@@ -26,7 +26,7 @@ loader_command_buffer_create :: proc() -> (cb: vk.CommandBuffer, fence: vk.Fence
 	vk_chk(vk.CreateFence(vkDevice, &{sType = .FENCE_CREATE_INFO}, nil, &fence))
 	return cb, fence
 }
-loader_command_buffer_destroy :: proc(cb: vk.CommandBuffer, fence: vk.Fence) {
+loader_command_buffer_wait_and_destroy :: proc(cb: vk.CommandBuffer, fence: vk.Fence) {
 
 	vk_chk(vk.EndCommandBuffer(cb))
 	tempCbArr := [?]vk.CommandBuffer{cb}

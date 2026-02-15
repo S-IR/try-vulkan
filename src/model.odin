@@ -17,14 +17,7 @@ GltfVertex :: struct {
 	uv:   [2]f32,
 	norm: [3]f32,
 }
-GltfPrimitiveImage :: struct {
-	data:                    [^]u8,
-	width, height, channels: i32,
-	magFilter:               c.filter_type,
-	minFilter:               c.filter_type,
-	wrapS:                   c.wrap_mode,
-	wrapT:                   c.wrap_mode,
-}
+
 
 // GltfPrimitive :: struct {
 // 	// vertices:        [dynamic]GltfVertex,
@@ -74,7 +67,7 @@ read_gltf_model :: proc(path: string, cb: vk.CommandBuffer) -> (model: Model) //
 
 		for primitive in mesh.primitives {
 
-			primInfoImage := GltfPrimitiveImage{}
+			primInfoImage := ImageLoaderInputs{}
 
 
 			// positions := make([dynamic][3]f32, context.temp_allocator)
@@ -197,7 +190,7 @@ read_gltf_model :: proc(path: string, cb: vk.CommandBuffer) -> (model: Model) //
 					DESIRED_CHANNELS,
 				)
 			}
-
+			defer stbImage.image_free(primInfoImage.data)
 			assert(primInfoImage.data != nil)
 			assert(primInfoImage.width != 0)
 			assert(primInfoImage.height != 0)
@@ -205,10 +198,10 @@ read_gltf_model :: proc(path: string, cb: vk.CommandBuffer) -> (model: Model) //
 
 			if texture.sampler != nil {
 				sampler := texture.sampler
-				primInfoImage.magFilter = sampler.mag_filter
-				primInfoImage.minFilter = sampler.min_filter
-				primInfoImage.wrapS = sampler.wrap_s
-				primInfoImage.wrapT = sampler.wrap_t
+
+				magFilter: vk.Filter = .LINEAR
+				primInfoImage.magFilter = cgltf_filter_type_to_vk_filter(sampler.mag_filter)
+				primInfoImage.minFilter = cgltf_filter_type_to_vk_filter(sampler.min_filter)
 			}
 			primitive_image_assert(primInfoImage)
 
@@ -398,8 +391,22 @@ model_destroy :: proc(m: Model) {
 	delete(m.renderObjs)
 
 }
+cgltf_filter_type_to_vk_filter :: proc(t: c.filter_type) -> (vkT: vk.Filter) {
+	switch t {
+	case .linear_mipmap_linear:
+	case .linear:
+	case .linear_mipmap_nearest:
+	case .undefined:
+		vkT = .LINEAR
+	case .nearest:
+	case .nearest_mipmap_nearest:
+	case .nearest_mipmap_linear:
+		vkT = .NEAREST
 
-primitive_image_assert :: proc(pi: GltfPrimitiveImage) {
+	}
+	return vkT
+}
+primitive_image_assert :: proc(pi: ImageLoaderInputs) {
 	when ODIN_DEBUG {
 		assert(pi.data != nil)
 		assert(pi.width != 0)

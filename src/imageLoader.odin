@@ -9,8 +9,14 @@ GPUTexture :: struct {
 	descriptor: vk.DescriptorImageInfo,
 	allocation: vma.Allocation,
 }
+ImageLoaderInputs :: struct {
+	data:                    [^]u8,
+	width, height, channels: i32,
+	magFilter:               vk.Filter,
+	minFilter:               vk.Filter,
+}
 
-load_gltf_image :: proc(pi: GltfPrimitiveImage, cb: vk.CommandBuffer) -> (texture: GPUTexture) {
+load_gltf_image :: proc(pi: ImageLoaderInputs, cb: vk.CommandBuffer) -> (texture: GPUTexture) {
 	primitive_image_assert(pi)
 	//i assume 4 channels to set the format properly
 	assert(pi.channels == 4)

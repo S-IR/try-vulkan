@@ -12,13 +12,13 @@ import "core:prof/spall"
 import "core:strings"
 import "core:sync"
 import "core:time"
-import "obj"
+import "vendor:microui"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
 MAX_TEXTURES :: 8
 
-ENABLE_SPALL :: false && ODIN_DEBUG
+ENABLE_SPALL :: true && ODIN_DEBUG
 when ODIN_DEBUG && ENABLE_SPALL {
 	spall_ctx: spall.Context
 	@(thread_local)
@@ -95,10 +95,13 @@ main :: proc() {
 	vulkan_init()
 	defer vulkan_cleanup()
 
-	cb, fence := loader_command_buffer_create()
+	textPipeline := vk_ui_init()
+	defer vk_ui_destroy(textPipeline)
+
+	loadCb, fence := loader_command_buffer_create()
 	model := read_gltf_model(
 		filepath.join({"assets", "ABeautifulGame.glb"}, context.temp_allocator),
-		cb,
+		loadCb,
 	)
 	defer model_destroy(model)
 
@@ -106,8 +109,16 @@ main :: proc() {
 	modelPipeline := model_pipeline_init()
 	defer model_pipeline_destroy(modelPipeline)
 
+	font := bmfont_json_load(
+		filepath.join(
+			{"assets", "fonts", "NotoSans-VariableFont_wdth,wght.json"},
+			context.temp_allocator,
+		),
+		loadCb,
+	)
+	defer bmfont_destroy(font)
 
-	loader_command_buffer_destroy(cb, fence)
+	loader_command_buffer_wait_and_destroy(loadCb, fence)
 	vk_buffer_pool_clear()
 
 
@@ -120,6 +131,7 @@ main :: proc() {
 
 	lastFrameTime := time.now()
 	camera := Camera_new()
+
 
 	defer vk.DeviceWaitIdle(vkDevice)
 	for !quit {
@@ -177,6 +189,7 @@ main :: proc() {
 
 		}
 		Camera_process_keyboard_movement(&camera)
+		ui_frame_reset()
 
 		vulkan_update_swapchain()
 		vk_chk(vk.WaitForFences(vkDevice, 1, &fences[frameIndex], true, max(u64)))
@@ -279,6 +292,10 @@ main :: proc() {
 		)
 
 		model_draw(cb, &camera, model, modelPipeline)
+
+		ui_add_text("TAKING SOULS", font, 128, 100, 100, [4]f32{.5, .5, .5, 1})
+		ui_render_text(cb, textPipeline)
+
 		vk.CmdEndRendering(cb)
 
 		vk.CmdPipelineBarrier2(
@@ -767,9 +784,11 @@ vulkan_update_swapchain :: proc() {
 	}
 
 	vk_chk(vk.GetSwapchainImagesKHR(vkDevice, vkSwapchain, &vkImageCount, nil))
-	vkSwapchainImages = make([dynamic]vk.Image, vkImageCount)
-	delete(vkSwpachainImageViews)
+	clear_dynamic_array(&vkSwapchainImages)
+	resize(&vkSwapchainImages, vkImageCount)
+
 	clear_dynamic_array(&vkSwpachainImageViews)
+	resize(&vkSwpachainImageViews, vkImageCount)
 	vk_chk(
 		vk.GetSwapchainImagesKHR(
 			vkDevice,

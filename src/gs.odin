@@ -1,7 +1,7 @@
 package main
-
 import "../modules/vma"
 import "core:container/small_array"
+import "core:fmt"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
 
@@ -81,7 +81,7 @@ VkBufferPoolElem :: struct {
 }
 vkBufferPool: small_array.Small_Array(VK_BUFFER_POOL_MAX_ALLOCATIONS, VkBufferPoolElem) = {}
 vk_buffer_pool_clear :: proc() {
-	for e in small_array.slice(&vkBufferPool) {
+	for e, i in small_array.slice(&vkBufferPool) {
 		vma.unmap_memory(vkAllocator, e.alloc)
 		vma.destroy_buffer(vkAllocator, e.buffer, e.alloc)
 	}

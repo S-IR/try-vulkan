@@ -15,7 +15,6 @@ import "core:time"
 import "vendor:microui"
 import sdl "vendor:sdl3"
 import vk "vendor:vulkan"
-
 MAX_TEXTURES :: 8
 
 ENABLE_SPALL :: true && ODIN_DEBUG
@@ -95,10 +94,12 @@ main :: proc() {
 	vulkan_init()
 	defer vulkan_cleanup()
 
-	textPipeline := vk_ui_init()
-	defer vk_ui_destroy(textPipeline)
 
 	loadCb, fence := loader_command_buffer_create()
+	textPipeline := vk_ui_init(loadCb)
+	defer vk_ui_destroy(textPipeline)
+
+
 	model := read_gltf_model(
 		filepath.join({"assets", "ABeautifulGame.glb"}, context.temp_allocator),
 		loadCb,
@@ -117,6 +118,8 @@ main :: proc() {
 		loadCb,
 	)
 	defer bmfont_destroy(font)
+
+	mu_init(&font)
 
 	loader_command_buffer_wait_and_destroy(loadCb, fence)
 	vk_buffer_pool_clear()
@@ -189,7 +192,6 @@ main :: proc() {
 
 		}
 		Camera_process_keyboard_movement(&camera)
-		ui_frame_reset()
 
 		vulkan_update_swapchain()
 		vk_chk(vk.WaitForFences(vkDevice, 1, &fences[frameIndex], true, max(u64)))
@@ -293,9 +295,9 @@ main :: proc() {
 
 		model_draw(cb, &camera, model, modelPipeline)
 
-		ui_add_text("TAKING SOULS", font, 128, 100, 100, [4]f32{.5, .5, .5, 1})
-		ui_render_text(cb, textPipeline)
-
+		// ui_add_text("TAKING SOULS", font, 128, 100, 100, [4]f32{.5, .5, .5, 1})
+		mu_layout()
+		mu_render_ui(cb, textPipeline)
 		vk.CmdEndRendering(cb)
 
 		vk.CmdPipelineBarrier2(

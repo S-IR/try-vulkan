@@ -8,6 +8,7 @@ import "core:mem"
 import os "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
+import mu "vendor:microui"
 import sdl "vendor:sdl3"
 import stbImage "vendor:stb/image"
 import vk "vendor:vulkan"
@@ -30,15 +31,12 @@ Kerning :: struct {
 BMFont_Info :: struct {
 	face: string,
 	size: i32,
-
-	// ... other fields if needed
 }
 
 BMFont_Common :: struct {
 	lineHeight:     i32,
 	base:           i32,
 	scaleW, scaleH: i32,
-	// pages, etc.
 }
 
 BMFont :: struct {
@@ -121,41 +119,53 @@ TextVertex :: struct {
 	pos: [2]f32,
 	uv:  [2]f32,
 }
-TextPushConstants :: struct #align (16) {
+UIBatchMode :: enum (u32) {
+	Solid,
+	Text,
+}
+UIPushConstants :: struct #align (16) {
 	color:   [4]f32,
 	pxRange: f32,
+	mode:    UIBatchMode, // 0 = solid, 1 = text
 }
 
 
-MAX_TEXT_VERTS :: 4096 * 6
-VkTextFont :: struct {
-	color:       [4]f32,
-	descriptor:  vk.DescriptorImageInfo,
-	vertices:    small_array.Small_Array(MAX_TEXT_VERTS, TextVertex),
-	face:        string,
-	firstVertex: u32,
-	vertexCount: u32,
+VK_UI_DUMMY_TEXTURE_ID: u32 : 0
+vkDummyTexture: GPUTexture
+
+ui_create_dummy_texture :: proc(cb: vk.CommandBuffer) {
+	// 1x1 white RGBA
+	data := [4]u8{255, 255, 255, 255}
+	inputs: ImageLoaderInputs
+	inputs.data = raw_data(data[:])
+	inputs.width = 1
+	inputs.height = 1
+	inputs.channels = 4
+	inputs.magFilter = .NEAREST
+	inputs.minFilter = .NEAREST
+	vkDummyTexture = load_gltf_image(inputs, cb)
 }
 
-MAX_TEXT_FONTS :: 5
-vkTextFonts: small_array.Small_Array(MAX_TEXT_FONTS, VkTextFont)
 
-vkTextVertexBuffer: vk.Buffer
-vkTextVertexAlloc: vma.Allocation
+// vkTextFonts: small_array.Small_Array(MAX_TEXT_FONTS, UIBatch)
+vkUIVertexBuffer: vk.Buffer
+vkUIVertexAlloc: vma.Allocation
+VK_VERTEX_BUFFER_MAX_SIZE: int : VK_UI_MAX_VERTICES * size_of(TextVertex)
+VK_UI_MAX_VERTICES :: 4096 * 6
+vk_ui_init :: proc(cb: vk.CommandBuffer) -> (p: PipelineData) {
+	ui_create_dummy_texture(cb)
 
-
-vk_ui_init :: proc() -> (p: PipelineData) {
 	vk_chk(
 		vma.create_buffer(
 			vkAllocator,
 			{
 				sType = .BUFFER_CREATE_INFO,
-				size = vk.DeviceSize(MAX_TEXT_FONTS * MAX_TEXT_VERTS * size_of(TextVertex)),
+				size = vk.DeviceSize(VK_VERTEX_BUFFER_MAX_SIZE),
 				usage = {.VERTEX_BUFFER},
 			},
 			{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
-			&vkTextVertexBuffer,
-			&vkTextVertexAlloc,
+			&vkUIVertexBuffer,
+			&vkUIVertexAlloc,
 			nil,
 		),
 	)
@@ -187,7 +197,7 @@ vk_ui_init :: proc() -> (p: PipelineData) {
 	pushRange := vk.PushConstantRange {
 		stageFlags = {.VERTEX, .FRAGMENT},
 		offset     = 0,
-		size       = size_of(TextPushConstants),
+		size       = size_of(UIPushConstants),
 	}
 	vk_chk(
 		vk.CreatePipelineLayout(
@@ -316,13 +326,28 @@ vk_ui_init :: proc() -> (p: PipelineData) {
 	vk_chk(vk.CreateGraphicsPipelines(vkDevice, 0, 1, &pipelineCi, nil, &p.graphicsPipeline))
 	return p
 }
-ui_frame_reset :: proc() {
-	small_array.clear(&vkTextFonts)
-}
-ui_add_text :: proc(str: string, font: BMFont, fontSize: f32, posX, posY: f32, color: [4]f32) {
+
+
+ui_write_font_verts :: proc(
+	str: string,
+	font: BMFont,
+	fontSize: f32,
+	posX, posY: f32,
+	destPtr: rawptr,
+	totalBytesWrittenPrev: int,
+) -> (
+	totalWrittenBytes: int,
+	vertexCount: u32,
+) {
+	assert(len(str) != 0)
 	assert(font.info.size != 0)
 	assert(font.glyphMap != nil)
 	assert(fontSize != 0)
+	assert(destPtr != nil)
+	assert(totalBytesWrittenPrev >= 0)
+
+	// for c in color do assert(c < 1 && c >= 0)
+
 
 	scale := fontSize / f32(font.info.size)
 
@@ -331,33 +356,38 @@ ui_add_text :: proc(str: string, font: BMFont, fontSize: f32, posX, posY: f32, c
 
 	prevId: i32 = -1
 
-	existingFontIdx := -1
-	for vkTextFont, i in small_array.slice(&vkTextFonts) {
-		if font.info.face == vkTextFont.face {
-			existingFontIdx = i
-			break
-		}
-	}
+	// batchIdx := -1
+	// batch: ^UIBatch
 
-	vkTextFont: ^VkTextFont
-	if existingFontIdx != -1 {
-		vkTextFont = small_array.get_ptr(&vkTextFonts, existingFontIdx)
-	} else {
-		idx := small_array.len(vkTextFonts)
-		small_array.append_elem(&vkTextFonts, VkTextFont{})
-		vkTextFont = small_array.get_ptr(&vkTextFonts, idx)
+	// for &b, i in small_array.slice(&vkUiBatches) {
+	// 	if b.mode == .Text && font.texture.id == b.textureID && b.color == color {
+	// 		batchIdx = i
+	// 		break
+	// 	}
+	// }
+	// if batchIdx == -1 {
+	// 	idx := small_array.len(vkUiBatches)
+	// 	small_array.append_elem(&vkUiBatches, UIBatch{})
+	// 	batch = small_array.get_ptr(&vkUiBatches, idx)
+	// 	batch.descriptor = font.texture.descriptor
+	// 	batch.color = color
+	// 	batch.mode = .Text
+	// 	batch.textureID = font.texture.id
+	// 	batchIdx = idx
+	// } else {
+	// 	batch = small_array.get_ptr(&vkUiBatches, batchIdx)
+	// }
+	// assert(batch != nil)
 
-	}
+	// when ODIN_DEBUG {
+	// 	_, found := font.glyphMap['?']
+	// 	assert(found)
+	// }
 
-	when ODIN_DEBUG {
-		_, found := font.glyphMap['?']
-		assert(found)
-	}
-
-	vkTextFont.color = color
-	vkTextFont.face = font.info.face
-	vkTextFont.descriptor = font.texture.descriptor
-
+	// batch.color = color
+	// batch.descriptor = font.texture.descriptor
+	destPtrCopy := (^TextVertex)(destPtr)
+	cumulativeBytes := totalBytesWrittenPrev
 
 	for r in str {
 		if r == '\n' {
@@ -373,7 +403,7 @@ ui_add_text :: proc(str: string, font: BMFont, fontSize: f32, posX, posY: f32, c
 		glyph, glyphFound := font.glyphMap[rune(r)]
 		if !glyphFound do glyph = font.glyphMap['?'] or_continue
 
-		left := penX + f32(glyph.xoffset) * scale
+		left := f32(glyph.xoffset) * scale
 		right := left + f32(glyph.width) * scale
 		top := penY + f32(glyph.yoffset) * scale
 		bottom := top + f32(glyph.height) * scale
@@ -395,16 +425,23 @@ ui_add_text :: proc(str: string, font: BMFont, fontSize: f32, posX, posY: f32, c
 		topNdc := 1 - (top / h) * 2
 		bottomNdc := 1 - (bottom / h) * 2
 
-
-		small_array.append(
-			&vkTextFont.vertices,
+		newVertices := [6]TextVertex {
 			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvTop}},
 			TextVertex{{rightNdc, bottomNdc}, {uvRight, uvTop}},
 			TextVertex{{rightNdc, topNdc}, {uvRight, uvBottom}},
 			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvTop}},
 			TextVertex{{rightNdc, topNdc}, {uvRight, uvBottom}},
 			TextVertex{{leftNdc, topNdc}, {uvLeft, uvBottom}},
-		)
+		}
+		totalBytesToWrite := size_of(TextVertex) * len(newVertices)
+		ensure((cumulativeBytes + totalBytesToWrite) <= VK_VERTEX_BUFFER_MAX_SIZE)
+
+		mem.copy(destPtrCopy, raw_data(newVertices[:]), totalBytesToWrite)
+		destPtrCopy = mem.ptr_offset(destPtrCopy, totalBytesToWrite)
+		cumulativeBytes += totalBytesToWrite
+		vertexCount += u32(len(newVertices))
+		totalWrittenBytes += totalBytesToWrite
+		// small_array.append(&batch.vertices)
 		penX += f32(glyph.xadvance) * scale
 
 		if prevId >= 0 {
@@ -419,88 +456,97 @@ ui_add_text :: proc(str: string, font: BMFont, fontSize: f32, posX, posY: f32, c
 
 		prevId = glyph.id
 	}
+	return totalWrittenBytes, vertexCount
+}
+mu_render_text :: proc(cb: vk.CommandBuffer, command: mu.Command_Text) {
 
 }
-ui_render_text :: proc(cb: vk.CommandBuffer, textP: PipelineData) {
-	if small_array.len(vkTextFonts) == 0 do return
+// ui_render_ui :: proc(cb: vk.CommandBuffer, uiP: PipelineData) {
+// 	if small_array.len(vkUiBatches) == 0 do return
 
-	vk.CmdSetViewport(
-		cb,
-		0,
-		1,
-		&vk.Viewport {
-			x = 0,
-			y = 0,
-			width = f32(screenWidth),
-			height = f32(screenHeight),
-			minDepth = 0,
-			maxDepth = 1,
-		},
-	)
-	vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D{offset = {0, 0}, extent = {screenWidth, screenHeight}})
+// 	vk.CmdSetViewport(
+// 		cb,
+// 		0,
+// 		1,
+// 		&vk.Viewport {
+// 			x = 0,
+// 			y = 0,
+// 			width = f32(screenWidth),
+// 			height = f32(screenHeight),
+// 			minDepth = 0,
+// 			maxDepth = 1,
+// 		},
+// 	)
+// 	vk.CmdSetScissor(cb, 0, 1, &vk.Rect2D{offset = {0, 0}, extent = {screenWidth, screenHeight}})
 
-	vk.CmdBindPipeline(cb, .GRAPHICS, textP.graphicsPipeline)
-	size := vk.DeviceSize(0)
 
-	offset := vk.DeviceSize(0)
-	vk.CmdBindVertexBuffers(cb, 0, 1, &vkTextVertexBuffer, &offset)
+// 	vk.CmdBindPipeline(cb, .GRAPHICS, uiP.graphicsPipeline)
 
-	// Map once
-	ptr: rawptr
-	vk_chk(vma.map_memory(vkAllocator, vkTextVertexAlloc, &ptr))
+// 	offset := vk.DeviceSize(0)
+// 	vk.CmdBindVertexBuffers(cb, 0, 1, &vkUIVertexBuffer, &offset)
 
-	basePtr := (^TextVertex)(ptr)
-	runningVertexOffset: u32 = 0
+// 	// Map once
+// 	ptr: rawptr
+// 	vk_chk(vma.map_memory(vkAllocator, vkUIVertexAlloc, &ptr))
+// 	basePtr := (^TextVertex)(ptr)
+// 	runningOffset: u32 = 0
 
-	for &font in small_array.slice(&vkTextFonts) {
-		verts := small_array.slice(&font.vertices)
-		count := u32(len(verts))
-		if count == 0 do continue
+// 	for &batch in small_array.slice(&vkUiBatches) {
+// 		verts := small_array.slice(&batch.vertices)
+// 		count := u32(len(verts))
+// 		assert(count > 0)
 
-		font.firstVertex = runningVertexOffset
-		font.vertexCount = count
+// 		if count == 0 do continue
 
-		mem.copy(basePtr, raw_data(verts), int(count) * size_of(TextVertex))
-		basePtr = mem.ptr_offset(basePtr, int(count) * size_of(TextVertex))
+// 		batch.firstVertex = runningOffset
+// 		batch.vertexCount = count
 
-		runningVertexOffset += count
-	}
+// 		mem.copy(basePtr, raw_data(verts), int(count) * size_of(TextVertex))
+// 		basePtr = mem.ptr_offset(basePtr, int(count) * size_of(TextVertex))
+// 		runningOffset += count
+// 	}
 
-	vma.unmap_memory(vkAllocator, vkTextVertexAlloc)
+// 	vma.unmap_memory(vkAllocator, vkUIVertexAlloc)
 
-	for &font in small_array.slice(&vkTextFonts) {
-		if font.vertexCount == 0 do continue
+// 	for &batch in small_array.slice(&vkUiBatches) {
+// 		assert(batch.vertexCount > 0)
+// 		if batch.vertexCount == 0 do continue
 
-		write := vk.WriteDescriptorSet {
-			sType           = .WRITE_DESCRIPTOR_SET,
-			dstBinding      = 0,
-			descriptorCount = 1,
-			descriptorType  = .COMBINED_IMAGE_SAMPLER,
-			pImageInfo      = &font.descriptor,
-		}
+// 		vk.CmdPushDescriptorSet(
+// 			cb,
+// 			.GRAPHICS,
+// 			uiP.layout,
+// 			0,
+// 			1,
+// 			&vk.WriteDescriptorSet {
+// 				sType = .WRITE_DESCRIPTOR_SET,
+// 				dstBinding = 0,
+// 				descriptorCount = 1,
+// 				descriptorType = .COMBINED_IMAGE_SAMPLER,
+// 				pImageInfo = &batch.descriptor,
+// 			},
+// 		)
+// 		push := UIPushConstants {
+// 			color   = batch.color,
+// 			pxRange = 6.0,
+// 			mode    = batch.mode,
+// 		}
+// 		vk.CmdPushConstants(
+// 			cb,
+// 			uiP.layout,
+// 			{.VERTEX, .FRAGMENT},
+// 			0,
+// 			size_of(UIPushConstants),
+// 			&push,
+// 		)
+// 		assert(batch.vertexCount > 0)
+// 		vk.CmdDraw(cb, batch.vertexCount, 1, batch.firstVertex, 0)
 
-		vk.CmdPushDescriptorSetKHR(cb, .GRAPHICS, textP.layout, 0, 1, &write)
-
-		push := TextPushConstants {
-			color   = font.color,
-			pxRange = 6.0,
-		}
-
-		vk.CmdPushConstants(
-			cb,
-			textP.layout,
-			{.VERTEX, .FRAGMENT},
-			0,
-			size_of(TextPushConstants),
-			&push,
-		)
-
-		vk.CmdDraw(cb, font.vertexCount, 1, font.firstVertex, 0)
-	}
-}
+// 	}
+// }
 vk_ui_destroy :: proc(textP: PipelineData) {
-	if vkTextVertexBuffer != {} {
-		vma.destroy_buffer(vkAllocator, vkTextVertexBuffer, vkTextVertexAlloc)
+	if vkUIVertexBuffer != {} {
+		vma.destroy_buffer(vkAllocator, vkUIVertexBuffer, vkUIVertexAlloc)
 	}
 	if textP.graphicsPipeline != {} {
 		vk.DestroyPipeline(vkDevice, textP.graphicsPipeline, nil)
@@ -511,4 +557,9 @@ vk_ui_destroy :: proc(textP: PipelineData) {
 	if textP.descriptorSetLayout != {} {
 		vk.DestroyDescriptorSetLayout(vkDevice, textP.descriptorSetLayout, nil)
 	}
+
+	if vkDummyTexture.descriptor.imageView != {} do vk.DestroyImageView(vkDevice, vkDummyTexture.descriptor.imageView, nil)
+	if vkDummyTexture.descriptor.sampler != {} do vk.DestroySampler(vkDevice, vkDummyTexture.descriptor.sampler, nil)
+	if vkDummyTexture.image != {} do vma.destroy_image(vkAllocator, vkDummyTexture.image, vkDummyTexture.allocation)
+
 }

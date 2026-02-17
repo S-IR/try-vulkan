@@ -8,7 +8,7 @@ GPUTexture :: struct {
 	image:      vk.Image,
 	descriptor: vk.DescriptorImageInfo,
 	allocation: vma.Allocation,
-	// id:         u32,
+	id:         u32,
 }
 ImageLoaderInputs :: struct {
 	data:                    [^]u8,
@@ -16,9 +16,15 @@ ImageLoaderInputs :: struct {
 	magFilter:               vk.Filter,
 	minFilter:               vk.Filter,
 }
-// vkUiNextTextureID := VK_UI_DUMMY_TEXTURE_ID + 1
+vkUiNextTextureID := VK_UI_DUMMY_TEXTURE_ID + 1
 
-load_gltf_image :: proc(pi: ImageLoaderInputs, cb: vk.CommandBuffer) -> (texture: GPUTexture) {
+load_gltf_image :: proc(
+	pi: ImageLoaderInputs,
+	cb: vk.CommandBuffer,
+	giveID := true,
+) -> (
+	texture: GPUTexture,
+) {
 	primitive_image_assert(pi)
 	//i assume 4 channels to set the format properly
 	assert(pi.channels == 4)
@@ -166,15 +172,15 @@ load_gltf_image :: proc(pi: ImageLoaderInputs, cb: vk.CommandBuffer) -> (texture
 	)
 	texture.descriptor.imageLayout = .READ_ONLY_OPTIMAL
 
-	// if giveID {
-	// 	texture.descriptor.imageLayout = .READ_ONLY_OPTIMAL
-	// 	texture.id = vkUiNextTextureID
-	// 	if vkUiNextTextureID == max(u32) - 1 {
-	// 		vkUiNextTextureID = (VK_UI_DUMMY_TEXTURE_ID + 1)
-	// 	} else {
-	// 		vkUiNextTextureID += 1
-	// 	}
+	if giveID {
+		texture.descriptor.imageLayout = .READ_ONLY_OPTIMAL
+		texture.id = vkUiNextTextureID
+		if vkUiNextTextureID == max(u32) - 1 {
+			vkUiNextTextureID = (VK_UI_DUMMY_TEXTURE_ID + 1)
+		} else {
+			vkUiNextTextureID += 1
+		}
 
-	// }
+	}
 	return texture
 }

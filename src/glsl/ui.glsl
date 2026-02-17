@@ -3,19 +3,20 @@
 #define SOLID_MODE 0
 #define TEXT_MODE 1
 layout(push_constant) uniform PushConstants {
+    mat4 ortho;
     vec4 color;
     float pxRange;
     uint mode;
 } pc;
 
 #ifdef VERTEX
-layout(location = 0) in vec2 in_pos;
-layout(location = 1) in vec2 in_uv;
+layout(location = 0) in vec2 inPos;
+layout(location = 1) in vec2 inUV;
 
-layout(location = 0) out vec2 out_uv;
+layout(location = 0) out vec2 outUV;
 void main() {
-    gl_Position = vec4(in_pos, 0.0, 1.0);
-    out_uv = in_uv;
+    gl_Position = pc.ortho * vec4(inPos, 0.0, 1.0);
+    outUV = inUV;
 }
 #endif
 

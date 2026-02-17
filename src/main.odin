@@ -96,8 +96,8 @@ main :: proc() {
 
 
 	loadCb, fence := loader_command_buffer_create()
-	textPipeline := vk_ui_init(loadCb)
-	defer vk_ui_destroy(textPipeline)
+	uiPipeline := vk_ui_init(loadCb)
+	defer vk_ui_destroy(uiPipeline)
 
 
 	model := read_gltf_model(
@@ -119,7 +119,7 @@ main :: proc() {
 	)
 	defer bmfont_destroy(font)
 
-	mu_init(&font)
+	// mu_init(&font)
 
 	loader_command_buffer_wait_and_destroy(loadCb, fence)
 	vk_buffer_pool_clear()
@@ -295,9 +295,11 @@ main :: proc() {
 
 		model_draw(cb, &camera, model, modelPipeline)
 
-		// ui_add_text("TAKING SOULS", font, 128, 100, 100, [4]f32{.5, .5, .5, 1})
-		mu_layout()
-		mu_render_ui(cb, textPipeline)
+		ui_add_rect(10, 10, 200, 200, [4]f32{.03, .27, .86, 1})
+		ui_add_text("TAKING SOULS", font, 32, 20, 20, [4]f32{.5, .5, .5, 1})
+		// mu_layout()
+		// mu_render_ui(cb, textPipeline)
+		ui_render_ui(cb, uiPipeline)
 		vk.CmdEndRendering(cb)
 
 		vk.CmdPipelineBarrier2(

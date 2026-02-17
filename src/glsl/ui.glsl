@@ -5,12 +5,13 @@
 layout(push_constant) uniform PushConstants {
     vec4 color;
     float pxRange;
-    u32 mode;
+    uint mode;
 } pc;
 
 #ifdef VERTEX
 layout(location = 0) in vec2 in_pos;
 layout(location = 1) in vec2 in_uv;
+
 layout(location = 0) out vec2 out_uv;
 void main() {
     gl_Position = vec4(in_pos, 0.0, 1.0);

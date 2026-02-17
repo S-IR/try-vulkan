@@ -12,30 +12,23 @@ mu_text_width :: proc(muFont: mu.Font, str: string) -> i32 {
 	assert(font != nil)
 	width: i32 = 0
 	prevId: i32 = -1
+	scale := i32(MU_FONT_SIZE) / i32(font.info.size)
 
 	for r in str {
+		glyph, glyphFound := font.glyphMap[rune(r)]
+		if !glyphFound do glyph = font.glyphMap['?'] or_continue
 
-		if r == '\n' {
-			break // only horizontal width
-		}
 
-		if r == ' ' || r == '\t' {
-			width += font.common.base / 2
-			continue
-		}
-
-		glyph, found := font.glyphMap[rune(r)]
-		if !found do glyph = font.glyphMap['?'] or_continue
-
-		width += glyph.xadvance
+		width += glyph.xadvance * scale
 
 		if prevId >= 0 {
-			for k in font.kernings {
-				if k.first == prevId && k.second == glyph.id {
-					width += k.amount
-					break
+			keringAmount: i32 = 0
+			for kering in font.kernings {
+				if kering.first == prevId && kering.second == glyph.id {
+					keringAmount = kering.amount
 				}
 			}
+			width += keringAmount * scale
 		}
 
 		prevId = glyph.id
@@ -47,11 +40,11 @@ mu_text_width :: proc(muFont: mu.Font, str: string) -> i32 {
 mu_text_height :: proc(muFont: mu.Font) -> i32 {
 	font := (^BMFont)(muFont)
 	assert(font != nil)
-	return font.common.lineHeight
+	scale := i32(MU_FONT_SIZE) / i32(font.info.size)
+	return font.common.lineHeight * scale
 }
 
 
-clayMemory := [dynamic]u8{}
 muCtx: mu.Context
 mu_init :: proc(font: ^BMFont) {
 	mu.init(&muCtx)
@@ -60,7 +53,7 @@ mu_init :: proc(font: ^BMFont) {
 	mu.default_style.font = mu.Font(font)
 	muCtx.style.font = mu.Font(font)
 }
-
+MU_FONT_SIZE :: 32
 mu_layout :: proc() {
 	mouseX, mouseY: f32
 	mouseState := sdl.GetMouseState(&mouseX, &mouseY)
@@ -81,7 +74,7 @@ mu_layout :: proc() {
 
 
 	mu.begin(&muCtx)
-	if mu.begin_window(&muCtx, "My window", {0, 0, 256, 256}) {
+	if mu.begin_window(&muCtx, "My window", {10, 10, 256, 256}) {
 
 		widths := [2]i32{60, -1}
 		mu.layout_row(&muCtx, widths[:], 0)
@@ -110,14 +103,16 @@ mu_layout :: proc() {
 }
 mu_render_ui :: proc(cb: vk.CommandBuffer, uiP: PipelineData) {
 	vk.CmdBindPipeline(cb, .GRAPHICS, uiP.graphicsPipeline)
-	assert(vkUIVertexBuffer != {})
+	vertexBuffer := vkUIVertexBuffers[frameIndex]
+	alloc := vkUIVertexAllocs[frameIndex]
+	assert(vertexBuffer != {})
 	offset := vk.DeviceSize(0)
-	vk.CmdBindVertexBuffers(cb, 0, 1, &vkUIVertexBuffer, &offset)
+	vk.CmdBindVertexBuffers(cb, 0, 1, &vertexBuffer, &offset)
 
-	ptr: ^TextVertex
-	vk_chk(vma.map_memory(vkAllocator, vkUIVertexAlloc, (^rawptr)(&ptr)))
+	ptr: ^u8
+	vk_chk(vma.map_memory(vkAllocator, alloc, (^rawptr)(&ptr)))
 	assert(ptr != nil)
-	defer vma.unmap_memory(vkAllocator, vkUIVertexAlloc)
+	defer vma.unmap_memory(vkAllocator, alloc)
 
 
 	currentVertexOffset: u32 = 0
@@ -129,11 +124,12 @@ mu_render_ui :: proc(cb: vk.CommandBuffer, uiP: PipelineData) {
 		case ^mu.Command_Text:
 			actualFont := (^BMFont)(cmd.font)
 			assert(actualFont != nil)
+			fontSize := f32(MU_FONT_SIZE)
 
 			writtenBytes, vertexCount := ui_write_font_verts(
 				cmd.str,
 				actualFont^,
-				f32(cmd.size),
+				fontSize,
 				f32(cmd.pos.x),
 				f32(cmd.pos.y),
 				ptr,
@@ -143,9 +139,10 @@ mu_render_ui :: proc(cb: vk.CommandBuffer, uiP: PipelineData) {
 			ptr = mem.ptr_offset(ptr, vertexCount * size_of(TextVertex))
 
 			currentByteOffset += writtenBytes
-			currentVertexOffset += u32(vertexCount)
+			assert(actualFont.texture != {})
+			assert(actualFont.texture.descriptor != {})
 
-			vk.CmdPushDescriptorSet(
+			vk.CmdPushDescriptorSetKHR(
 				cb,
 				.GRAPHICS,
 				uiP.layout,
@@ -178,15 +175,91 @@ mu_render_ui :: proc(cb: vk.CommandBuffer, uiP: PipelineData) {
 				size_of(UIPushConstants),
 				&push,
 			)
+			vma.flush_allocation(vkAllocator, alloc, 0, vk.DeviceSize(currentByteOffset))
 
-		// vk.CmdDraw(cb, vertexCount, 1, currentVertexOffset - u32(vertexCount), 0)
+			vk.CmdDraw(cb, vertexCount, 1, currentVertexOffset, 0)
+			currentVertexOffset += u32(vertexCount)
+
 
 		case ^mu.Command_Rect:
-			fmt.println("r_draw_rect(cmd.rect, cmd.color)")
+			left := f32(cmd.rect.x)
+			right := left + f32(cmd.rect.w)
+			top := f32(cmd.rect.y)
+			bottom := top + f32(cmd.rect.h)
+
+			screenWF32 := f32(screenWidth)
+			screenHF32 := f32(screenHeight)
+
+			leftNdc := ((left - (screenWF32 / 2)) * 2 / screenWF32)
+			rightNdc := ((right - (screenWF32 / 2)) * 2 / screenWF32)
+			topNdc := ((top - (screenHF32 / 2)) * 2 / screenHF32)
+			bottomNdc := ((bottom - (screenHF32 / 2)) * 2 / screenHF32)
+
+			rectVertices := [?]TextVertex {
+				TextVertex{{leftNdc, bottomNdc}, {}},
+				TextVertex{{rightNdc, bottomNdc}, {}},
+				TextVertex{{rightNdc, topNdc}, {}},
+				TextVertex{{leftNdc, bottomNdc}, {}},
+				TextVertex{{rightNdc, topNdc}, {}},
+				TextVertex{{leftNdc, topNdc}, {}},
+			}
+
+			sizeToWrite := len(rectVertices) * size_of(rectVertices[0])
+			mem.copy(ptr, raw_data(rectVertices[:]), sizeToWrite)
+			ptr = mem.ptr_offset(ptr, sizeToWrite)
+
+			vk.CmdPushDescriptorSetKHR(
+				cb,
+				.GRAPHICS,
+				uiP.layout,
+				0,
+				1,
+				&vk.WriteDescriptorSet {
+					sType = .WRITE_DESCRIPTOR_SET,
+					dstBinding = 0,
+					descriptorCount = 1,
+					descriptorType = .COMBINED_IMAGE_SAMPLER,
+					pImageInfo = &vkDummyTexture.descriptor,
+				},
+			)
+
+			push := UIPushConstants {
+				color   = [4]f32 {
+					f32(cmd.color.r) / f32(max(u8)),
+					f32(cmd.color.g) / f32(max(u8)),
+					f32(cmd.color.b) / f32(max(u8)),
+					f32(cmd.color.a) / f32(max(u8)),
+				},
+				pxRange = 6.0,
+				mode    = .Solid,
+			}
+			vk.CmdPushConstants(
+				cb,
+				uiP.layout,
+				{.VERTEX, .FRAGMENT},
+				0,
+				size_of(UIPushConstants),
+				&push,
+			)
+			vma.flush_allocation(vkAllocator, alloc, 0, vk.DeviceSize(currentByteOffset))
+
+			vk.CmdDraw(cb, len(rectVertices), 1, currentVertexOffset, 0)
+			currentVertexOffset += len(rectVertices)
+			currentByteOffset += sizeToWrite
 		case ^mu.Command_Icon:
-			fmt.println("r_draw_icon(cmd.id, cmd.rect, cmd.color)")
+		// fmt.println("r_draw_icon(cmd.id, cmd.rect, cmd.color)")
 		case ^mu.Command_Clip:
-			fmt.println("r_set_clip_rect(cmd.rect)")
+			clipX := u32(cmd.rect.x)
+			clipY := u32(cmd.rect.y)
+			clipW := u32(cmd.rect.w)
+			clipH := u32(cmd.rect.h)
+
+			scissor := vk.Rect2D {
+				offset = vk.Offset2D{x = i32(clipX), y = i32(clipY)},
+				extent = vk.Extent2D{width = clipW, height = clipH},
+			}
+
+			vk.CmdSetScissor(cb, 0, 1, &scissor)
 		case ^mu.Command_Jump:
 			fmt.println("unreachable()")
 		}

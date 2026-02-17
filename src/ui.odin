@@ -148,27 +148,30 @@ ui_create_dummy_texture :: proc(cb: vk.CommandBuffer) {
 
 
 // vkTextFonts: small_array.Small_Array(MAX_TEXT_FONTS, UIBatch)
-vkUIVertexBuffer: vk.Buffer
-vkUIVertexAlloc: vma.Allocation
+vkUIVertexBuffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer
+vkUIVertexAllocs: [MAX_FRAMES_IN_FLIGHT]vma.Allocation
 VK_VERTEX_BUFFER_MAX_SIZE: int : VK_UI_MAX_VERTICES * size_of(TextVertex)
 VK_UI_MAX_VERTICES :: 4096 * 6
 vk_ui_init :: proc(cb: vk.CommandBuffer) -> (p: PipelineData) {
 	ui_create_dummy_texture(cb)
 
-	vk_chk(
-		vma.create_buffer(
-			vkAllocator,
-			{
-				sType = .BUFFER_CREATE_INFO,
-				size = vk.DeviceSize(VK_VERTEX_BUFFER_MAX_SIZE),
-				usage = {.VERTEX_BUFFER},
-			},
-			{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
-			&vkUIVertexBuffer,
-			&vkUIVertexAlloc,
-			nil,
-		),
-	)
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		vk_chk(
+			vma.create_buffer(
+				vkAllocator,
+				{
+					sType = .BUFFER_CREATE_INFO,
+					size = vk.DeviceSize(VK_VERTEX_BUFFER_MAX_SIZE),
+					usage = {.VERTEX_BUFFER},
+				},
+				{flags = {.Host_Access_Sequential_Write, .Mapped}, usage = .Auto},
+				&vkUIVertexBuffers[i],
+				&vkUIVertexAllocs[i],
+				nil,
+			),
+		)
+
+	}
 
 
 	layoutBindings := [?]vk.DescriptorSetLayoutBinding {
@@ -350,6 +353,16 @@ ui_write_font_verts :: proc(
 
 
 	scale := fontSize / f32(font.info.size)
+	// fmt.printf(
+	// 	"ui_write_font_verts called | str='%.*s' | pos=(%.1f, %.1f) | fontSize=%.1f | scale=%.3f\n",
+	// 	min(20, len(str)),
+	// 	raw_data(str),
+	// 	posX,
+	// 	posY,
+	// 	fontSize,
+	// 	scale,
+	// )
+
 
 	penX := posX
 	penY := posY
@@ -386,24 +399,14 @@ ui_write_font_verts :: proc(
 
 	// batch.color = color
 	// batch.descriptor = font.texture.descriptor
-	destPtrCopy := (^TextVertex)(destPtr)
+	destPtrCopy := (^u8)(destPtr)
 	cumulativeBytes := totalBytesWrittenPrev
 
 	for r in str {
-		if r == '\n' {
-			penX = posX
-			penY += f32(font.common.lineHeight) * scale
-			continue
-		}
-		if r == ' ' || r == '\t' {
-			penX += f32(font.common.base) * scale * 0.5
-			continue
-		}
-
 		glyph, glyphFound := font.glyphMap[rune(r)]
 		if !glyphFound do glyph = font.glyphMap['?'] or_continue
 
-		left := f32(glyph.xoffset) * scale
+		left := penX + f32(glyph.xoffset) * scale
 		right := left + f32(glyph.width) * scale
 		top := penY + f32(glyph.yoffset) * scale
 		bottom := top + f32(glyph.height) * scale
@@ -420,19 +423,31 @@ ui_write_font_verts :: proc(
 		w := f32(screenWidth)
 		h := f32(screenHeight)
 
-		leftNdc := (left / w * 2 - 1)
-		rightNdc := (right / w * 2 - 1)
-		topNdc := 1 - (top / h) * 2
-		bottomNdc := 1 - (bottom / h) * 2
-
+		leftNdc := ((left - (w / 2)) * 2 / w)
+		rightNdc := ((right - (w / 2)) * 2 / w)
+		topNdc := ((top - (h / 2)) * 2 / h)
+		bottomNdc := ((bottom - (h / 2)) * 2 / h)
+		// fmt.printf(
+		// 	"  → glyph '%c' | screen y: top=%.1f bottom=%.1f | NDC y: topNdc=%.4f bottomNdc=%.4f\n",
+		// 	r,
+		// 	top,
+		// 	bottom,
+		// 	topNdc,
+		// 	bottomNdc,
+		// )
 		newVertices := [6]TextVertex {
-			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvTop}},
-			TextVertex{{rightNdc, bottomNdc}, {uvRight, uvTop}},
-			TextVertex{{rightNdc, topNdc}, {uvRight, uvBottom}},
-			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvTop}},
-			TextVertex{{rightNdc, topNdc}, {uvRight, uvBottom}},
-			TextVertex{{leftNdc, topNdc}, {uvLeft, uvBottom}},
+			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvBottom}},
+			TextVertex{{rightNdc, bottomNdc}, {uvRight, uvBottom}},
+			TextVertex{{rightNdc, topNdc}, {uvRight, uvTop}},
+			TextVertex{{leftNdc, bottomNdc}, {uvLeft, uvBottom}},
+			TextVertex{{rightNdc, topNdc}, {uvRight, uvTop}},
+			TextVertex{{leftNdc, topNdc}, {uvLeft, uvTop}},
 		}
+		assert(leftNdc != 0)
+		assert(rightNdc != 0)
+		assert(topNdc != 0)
+		assert(bottomNdc != 0)
+
 		totalBytesToWrite := size_of(TextVertex) * len(newVertices)
 		ensure((cumulativeBytes + totalBytesToWrite) <= VK_VERTEX_BUFFER_MAX_SIZE)
 
@@ -545,9 +560,12 @@ mu_render_text :: proc(cb: vk.CommandBuffer, command: mu.Command_Text) {
 // 	}
 // }
 vk_ui_destroy :: proc(textP: PipelineData) {
-	if vkUIVertexBuffer != {} {
-		vma.destroy_buffer(vkAllocator, vkUIVertexBuffer, vkUIVertexAlloc)
+	for b, i in vkUIVertexBuffers {
+		if b != {} {
+			vma.destroy_buffer(vkAllocator, b, vkUIVertexAllocs[i])
+		}
 	}
+
 	if textP.graphicsPipeline != {} {
 		vk.DestroyPipeline(vkDevice, textP.graphicsPipeline, nil)
 	}

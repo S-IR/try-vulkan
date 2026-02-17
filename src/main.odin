@@ -112,7 +112,7 @@ main :: proc() {
 
 	font := bmfont_json_load(
 		filepath.join(
-			{"assets", "fonts", "NotoSans-VariableFont_wdth,wght.json"},
+			{"assets", "fonts", "NotoSans-VariableFont_wdth,wght-msdf.json"},
 			context.temp_allocator,
 		),
 		loadCb,

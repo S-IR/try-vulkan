@@ -80,7 +80,7 @@ main :: proc() {
 	}
 
 
-	sdl_ensure(sdl.Init({.VIDEO, .EVENTS}))
+	sdl_ensure(sdl.Init({.VIDEO, .EVENTS, .VULKAN}))
 	window = sdl.CreateWindow(
 		"How to vulkan",
 		i32(screenWidth),
